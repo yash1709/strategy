@@ -39,7 +39,9 @@ and `TELEGRAM_CHAT_ID`, or `NSE_MONITOR_WEBHOOK`.
 1. Go to https://share.streamlit.io and sign in with GitHub. Click **Create app →
    Deploy a public app from GitHub**.
 2. Set Repository to `<you>/<repo>`, Branch to `main`, and Main file to `streamlit_app.py`.
-3. Under **Advanced settings → Secrets**, paste:
+3. Optional: under **Advanced settings → Secrets**, paste the lines below. By default the app already reads
+   `yash1709/strategy` (`DEFAULT_GITHUB_REPO` in `streamlit_app.py`); a secret is needed only for a fork
+   or a private repository:
    ```toml
    GITHUB_REPO = "<you>/<repo>"
    # private repository only: a fine-grained token with read-only "Contents" on this repo

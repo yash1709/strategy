@@ -4,7 +4,9 @@ Data source (first match wins):
 1. Streamlit secrets / env ``GITHUB_REPO`` ("owner/repo") -> downloads ``state.db`` from the
    repo's ``DATA_BRANCH`` (default "data"), which the GitHub Actions job updates every weekday.
    For a private repo also set ``GITHUB_TOKEN`` (fine-grained, read-only "Contents").
-2. ``NSE_MONITOR_DB`` env var, else ``data/nse_monitor.db`` -- the local database.
+2. ``NSE_MONITOR_DB`` env var, else ``data/nse_monitor.db`` -- the local database, if it exists.
+3. ``DEFAULT_GITHUB_REPO`` below (this project's repository), so the hosted app works with no
+   secrets at all. Override with a ``DEFAULT_GITHUB_REPO`` secret/env ("" disables it).
 
 Run locally:  streamlit run streamlit_app.py
 """
@@ -28,6 +30,7 @@ from nse_monitor.storage import Repository
 st.set_page_config(page_title="NSE RSI Monitor", page_icon="📉", layout="wide")
 
 CACHE_SECONDS = 300
+DEFAULT_GITHUB_REPO = "yash1709/strategy"
 DATE_COLS = ["Last Trading Day", "RSI Date", "Tracking Start Date", "Crossover Date", "Exit Date"]
 
 
@@ -102,7 +105,8 @@ def _csv(df: pd.DataFrame) -> bytes:
 
 
 # ---------------------------------------------------------------- load data
-repo_name = _setting("GITHUB_REPO")
+local = os.environ.get("NSE_MONITOR_DB", "data/nse_monitor.db")
+repo_name = _setting("GITHUB_REPO") or ("" if Path(local).exists() else _setting("DEFAULT_GITHUB_REPO", DEFAULT_GITHUB_REPO))
 try:
     if repo_name:
         branch, token = _setting("DATA_BRANCH", "data"), _setting("GITHUB_TOKEN")
@@ -110,7 +114,6 @@ try:
         active, hist, stats, info = load_tables(f"gh:{repo_name}:{branch}", payload, None)
         source = f"GitHub `{repo_name}` · branch `{branch}`"
     else:
-        local = os.environ.get("NSE_MONITOR_DB", "data/nse_monitor.db")
         if not Path(local).exists():
             st.error("No data source configured. Set `GITHUB_REPO` in the app's secrets "
                      "(see DEPLOY.md), or run the monitor locally first.")

@@ -67,6 +67,7 @@ def test_dashboard_filters(db, monkeypatch):
 
 def test_dashboard_without_data_source_explains(monkeypatch, tmp_path):
     monkeypatch.delenv("GITHUB_REPO", raising=False)
+    monkeypatch.setenv("DEFAULT_GITHUB_REPO", "")  # disable the built-in default for this test
     monkeypatch.setenv("NSE_MONITOR_DB", str(tmp_path / "missing.db"))
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()
