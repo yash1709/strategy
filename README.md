@@ -1,121 +1,273 @@
-# NSE RSI < 30 → SMA 50 Crossover Monitor
+# NSE RSI Reversal Monitor
 
-Runs every NSE trading day and answers two questions:
+**Automated daily screening of NSE stocks and ETFs for oversold conditions (RSI < 30), with trading-day tracking until price recovers above its 50-day moving average.**
 
-1. **Which NSE stocks recently fell below RSI 30 and are being tracked right now?** → *Active Tracking List*
-2. **How many trading days did each one take for its close to cross above SMA 50?** → *Historical Crossover Database*
+[![Live dashboard](https://img.shields.io/badge/Live%20dashboard-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://strategy-gmk9uegg9dtzvennq7xyv4.streamlit.app/)
+[![Daily NSE monitor](https://github.com/yash1709/strategy/actions/workflows/daily.yml/badge.svg)](https://github.com/yash1709/strategy/actions/workflows/daily.yml)
+![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)
+
+### 🔗 Live dashboard: **https://strategy-gmk9uegg9dtzvennq7xyv4.streamlit.app/**
+
+Updated automatically every NSE trading day. Works in any browser, on any device, with no login.
+
+---
+
+## Contents
+- [What it answers](#what-it-answers)
+- [How it works](#how-it-works)
+- [Strategy rules](#strategy-rules)
+- [Data sources and data quality](#data-sources-and-data-quality)
+- [The dashboard](#the-dashboard)
+- [Automation and operations](#automation-and-operations)
+- [Notifications](#notifications)
+- [Running locally](#running-locally)
+- [Configuration](#configuration)
+- [Project structure](#project-structure)
+- [Extending: replacing the data source](#extending-replacing-the-data-source)
+- [Testing](#testing)
+- [Limitations](#limitations)
+
+---
+
+## What it answers
+
+| Question | Where |
+|---|---|
+| Which NSE stocks and ETFs have recently fallen below RSI 30 and are being tracked now? | **Active Tracking List**, largest market cap / AUM first |
+| For each one, how many trading days did the close take to rise back above SMA 50? | **Historical Crossover Database**, most recent exit first |
+
+**Coverage:** all NSE `EQ`-series equities (about 2,300) and NSE-listed ETFs (about 330: equity, gold, silver, debt and international). Tracking history starts on 1 August 2026.
+
+---
+
+## How it works
 
 ```
-NSE equity list → daily closes → RSI(14) → RSI < 30 screen → add to tracking list
-→ (next trading day) CMP vs SMA 50 each day → CMP > SMA 50 → alert → move to history
+NSE equity + ETF lists ──┐
+Yahoo Finance closes ────┼──▶  RSI(14) < 30  ──▶  Active tracking  ──▶  daily: close > SMA 50 ?
+AMFI ETF AUM ────────────┘      (entry)           (from next             │
+                                                   trading day)          ▼ yes
+                                                              alert + move to Historical
+                                                              Crossover Database
 ```
 
-## Quick start (Windows)
+**Deployment:**
+
+```
+GitHub Actions (Mon–Fri 16:30 & 19:30 IST)
+   restore state from `data` branch ─▶ python -m nse_monitor run ─▶ publish state to `data` branch
+                                                                          │
+Streamlit Community Cloud ◀── reads state.db (refreshed every 5 min) ─────┘
+   https://strategy-gmk9uegg9dtzvennq7xyv4.streamlit.app/
+```
+
+- **GitHub Actions** runs the job twice every weekday, entirely in the cloud; no local machine is involved.
+- **Tracking state** (active list, history, audit log) is kept in the repository's [`data`](https://github.com/yash1709/strategy/tree/data) branch as a 1.6 MB SQLite file. Only the latest version is kept, so repository history stays small. Every run's state is also saved as a 30-day workflow artifact.
+- **The price cache** (about 30 MB) lives in the GitHub Actions cache. If it is ever evicted, the next run re-downloads prices in about 3 minutes.
+- **The Streamlit dashboard** reads the published state directly from GitHub.
+
+---
+
+## Strategy rules
+
+| Rule | Implementation |
+|---|---|
+| **Price basis** | Daily closing prices for RSI, CMP and SMA 50 |
+| **RSI** | 14-period Wilder's RSI, verified against an independent reference implementation |
+| **Entry** | First trading day with RSI < 30. Records the date and RSI value. Needs at least 100 bars of history |
+| **No duplicates** | A tracked symbol is never re-added (enforced by the database). After it exits, a new RSI < 30 day starts a new cycle |
+| **Tracking start** | The next trading day after the RSI date, set only when that session is actually processed, so holidays are handled correctly |
+| **Exit** | First session from the tracking start where the close is strictly above SMA 50 |
+| **Duration** | Trading sessions from the tracking start to the crossover, both included. Crossing on the first tracked day counts as 1 |
+| **No look-ahead bias** | Each day uses only data dated on or before it. A test checks that running day by day with only past data gives exactly the same results as a historical replay |
+| **Atomic and repeatable** | Each trading day is a single database transaction. Re-running a day has no effect, and missed days are caught up in order |
+
+**Status values**
+- *Active:* `PENDING_START` (qualified today) · `ACTIVE` · `DATA_MISSING` (5+ sessions with no price) · `INSUFFICIENT_DATA` (fewer than 50 bars)
+- *History:* `SMA50_CROSSED` · `DELISTED` · `DATA_UNAVAILABLE` (60+ sessions with no price)
+
+---
+
+## Data sources and data quality
+
+| Data | Source | Refresh |
+|---|---|---|
+| Equity universe | NSE [`EQUITY_L.csv`](https://archives.nseindia.com/content/equities/EQUITY_L.csv) | Every run |
+| ETF universe | NSE [`eq_etfseclist.csv`](https://archives.nseindia.com/content/equities/eq_etfseclist.csv) | Every run |
+| Daily closes and volume | Yahoo Finance (`SYMBOL.NS`) | Every run, re-downloading the last 20 days |
+| Market cap (stocks) | Shares outstanding (Yahoo) × latest close | Share counts weekly, or right after a split |
+| AUM (ETFs) | [AMFI](https://www.amfiindia.com/aum-data/average-aum) scheme-wise quarterly average AUM, matched to each ETF by ISIN | Weekly check; AMFI publishes quarterly |
+
+Free data feeds have real defects. Each of these was found in production data and is handled explicitly:
+
+| Issue | Handling |
+|---|---|
+| **Holiday placeholder bars.** Yahoo publishes zero-volume bars that repeat the previous close on NSE holidays, e.g. 14-Sep-2026 | Discarded. A day counts as a trading session only if at least half of the stocks actually traded |
+| **Unadjusted splits and demergers.** For example 1:100 ETF unit splits (IVZINGOLD, LICMFGOLD) and demergers (VEDL, RAYMOND) | NSE price bands cap a normal day's move at 20%, so a one-day move beyond ±35% is a corporate action. Earlier prices are rescaled to remove the jump, using the exact split/bonus ratio when it matches one. Every adjustment is recorded in the audit log |
+| **Late or partial data** | A day is processed only once at least 90% of stocks have a price for it. A permanent gap is processed once later days are complete, and logged |
+| **Suspensions and delistings** | Missing days still count as trading days. Stocks that stay missing are flagged, then closed out, and delisted stocks move to history |
+| **Retroactive corporate-action adjustments by the provider** | Detected by comparing re-downloaded prices with the cache; that stock's full history is then downloaded again |
+| **Liquid and overnight ETFs** | Excluded by default: the price stays near ₹1,000 and moves by paise, so RSI is meaningless |
+
+---
+
+## The dashboard
+
+**[strategy-gmk9uegg9dtzvennq7xyv4.streamlit.app](https://strategy-gmk9uegg9dtzvennq7xyv4.streamlit.app/)**
+
+- **Summary:** active count, total crossovers, average and median trading days to cross, and the latest trading day.
+- **Historical Crossover Database:** latest exit first, then largest market cap / AUM. Shows the latest 30, with a toggle for the full history.
+- **Active Tracking List:** market cap / AUM, the size basis, CMP (close), volume, RSI date and value, tracking start, SMA 50 and days tracked. It can be filtered by type (stock or ETF), by symbol or company name, and by minimum size.
+- **CSV downloads** for both tables, and a **Refresh** button. Data is otherwise cached for 5 minutes.
+
+Streamlit Community Cloud puts apps to sleep after a period with no visitors. The first visit after that takes about 30 seconds while the app starts.
+
+---
+
+## Automation and operations
+
+| | |
+|---|---|
+| Schedule | Mon–Fri **16:30 IST** (main) and **19:30 IST** (retry for late data), via [GitHub Actions](https://github.com/yash1709/strategy/actions/workflows/daily.yml) |
+| Manual run | Actions → *Daily NSE monitor* → **Run workflow** |
+| Typical duration | About 2–4 minutes, including a full price re-download if the cache was evicted |
+| Holidays and weekends | Detected from the data; nothing is processed and nothing breaks |
+| Missed runs | The next run catches up on every unprocessed trading day, in order |
+| Backups | Each run's `state.db` is kept for 30 days as a workflow artifact |
+
+GitHub may start scheduled runs 5–30 minutes late at busy times. In public repositories, GitHub pauses scheduled workflows after 60 days without commits; it emails a warning first, and one click re-enables them.
+
+---
+
+## Notifications
+
+Crossover alerts are queued in the database and retried if delivery fails. The channels are the workflow log (always on), plus **Telegram**, a **webhook** (Slack, Discord, Teams or ntfy) or **email**. Set the channels you want as repository secrets under *Settings → Secrets and variables → Actions*: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `NSE_MONITOR_WEBHOOK`, `SMTP_PASSWORD`.
+
+```
+Stock: OBEROIRLTY (Oberoi Realty Limited)
+RSI Entry Date: 15-Sep-2026
+RSI: 26.8
+Crossover Date: 22-Sep-2026
+CMP: ₹1,845.60
+SMA 50: ₹1,836.46
+Trading Days Taken: 5
+Status: SMA 50 Crossed
+Market Cap: ₹67,106 Cr
+Volume: 470,585
+```
+
+A daily summary of new entries and crossovers is also sent.
+
+---
+
+## Running locally
 
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-copy config.example.toml config.toml        # edit notifications/filters as needed
+copy config.example.toml config.toml
 
-.\.venv\Scripts\python.exe -m nse_monitor run        # daily job (first run downloads ~1.5y of history, a few minutes)
-.\.venv\Scripts\python.exe -m nse_monitor status     # active tracking list
-.\.venv\Scripts\python.exe -m nse_monitor history    # crossover history + average days to cross
-
-powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1   # schedule it for every weekday
+.\.venv\Scripts\python.exe -m nse_monitor run                      # process new trading days
+.\.venv\Scripts\python.exe -m nse_monitor replay --start 2026-08-01 # backfill history (on an empty database)
+.\.venv\Scripts\python.exe -m streamlit run streamlit_app.py        # dashboard on http://localhost:8501
 ```
 
-Each run also writes `reports/active_tracking.csv`, `reports/crossover_history.csv` and
-`reports/dashboard.html`.
-
-### Commands
-
-| Command | What it does |
-| --- | --- |
-| `run [--as-of YYYY-MM-DD] [--no-notify]` | Process every unprocessed trading day up to today, send alerts, export reports |
-| `replay --start YYYY-MM-DD [--end ...] [--notify]` | Backfill / simulate from a past date. Use a fresh database: `--db data/replay.db` |
-| `status` / `history` | Print the active list / the completed records with statistics |
-| `audit [--symbol X]` | Every entry, start, crossover, data gap, delisting and price adjustment |
-| `export` | Rewrite the CSV/HTML reports |
+| Command | Purpose |
+|---|---|
+| `run [--as-of DATE] [--no-notify]` | Process every unprocessed trading day, send alerts, export reports |
+| `replay --start DATE [--end DATE]` | Replay history into an empty database. Its alerts are not sent |
+| `status` | Print the active tracking list |
+| `history [--limit N]` | Print the latest N crossovers (default 30; `0` for all) with statistics |
+| `audit [--symbol X]` | Show the audit trail: entries, crossovers, data gaps and price adjustments |
+| `export` | Write `reports/active_tracking.csv`, `crossover_history.csv` and `dashboard.html` |
 | `notify-test` / `retry-alerts` | Test notification channels / resend failed alerts |
 
-## Rules and how they are implemented
+The deployed setup doesn't need a local machine. `scripts/register_task.ps1` can still schedule the job on a Windows PC if you want to run it locally instead.
 
-| Rule | Implementation |
-| --- | --- |
-| Daily closing prices everywhere | RSI, CMP and SMA 50 all use the daily close (`nse_monitor/strategy.py`) |
-| RSI(14) | Wilder's smoothing (`indicators.py`), verified against an independent implementation |
-| Entry | First trading day with RSI < 30, stock has ≥ `min_history_bars` bars. The date and RSI value are recorded |
-| No duplicates | A tracked stock is never re-added (`UNIQUE(symbol)` on the active table). After it exits, a new RSI < 30 day starts a new cycle |
-| Tracking starts next trading day | `tracking_start_date` is filled in when the next session is actually processed, so holidays are handled automatically. Until then the status is `PENDING_START` |
-| Exit | First session from the tracking start where close > SMA 50 (strictly greater) |
-| Trading days taken | Trading sessions from tracking start to crossover day, both counted. Crossing on the first tracked day = 1. Equals the number of sessions after the RSI date |
-| No look-ahead | Each day is processed using only bars dated on or before it. Indicators are causal, and a test checks that running day by day with only past data gives exactly the same result as a replay |
-| Holidays | A day counts as a trading session only if at least half of NSE stocks actually traded that day. Yahoo publishes placeholder bars on NSE holidays (zero volume, previous close repeated), and its NIFTY index feed lists those days as sessions. Those bars are discarded, so holidays are never processed or counted. This was seen in live data on 1-May, 28-May, 26-Jun and 14-Sep-2026 |
-| Missed runs | The next run catches up every unprocessed trading day, in order |
-| Late or partial data | While the newest day has bars for fewer than `min_coverage` (90%) of stocks, it waits for the next run. If a later day is complete, the gap is permanent at the provider, so the day is processed and logged as `LOW_COVERAGE_DAY`. This way the system never stalls |
-| Suspended stocks / data gaps | The day still counts as a trading day. The stock is not evaluated and `missing_days` goes up. After 5 sessions the status is `DATA_MISSING`. After 60 the stock moves to history as `DATA_UNAVAILABLE` |
-| Delisted stocks | Once a stock leaves the NSE list and has no more bars, it moves to history as `DELISTED` |
-| Corporate actions (split/bonus) | Closes are split-adjusted. Each run re-downloads the last 20 days. If they differ from the cached prices by more than 0.5%, the stock's full history is downloaded again and an audit entry is written |
-| Splits, demergers and bad prints the provider didn't adjust | NSE price bands cap a normal session's move at 20%. So any one-day move beyond ±35% (`max_daily_move`) is treated as a corporate action or a data error, and all earlier prices are rescaled to remove the jump. If the move matches a standard split or bonus ratio (1:2, 1:10, 1:100, 2:3 and so on), that exact ratio is used. Otherwise the day's move is taken as zero, which also cancels one-day glitches. This matters in practice: Yahoo left many ETF unit splits unadjusted (for example IVZINGOLD and LICMFGOLD at 1:100, PSUBANK at 1:10) and several demergers too (for example VEDL, RAYMOND, INDIAGLYCO). Without the repair, RSI stays falsely below 30 for months. Decisions use only data up to each day, so there is no look-ahead. CMP and SMA 50 are always shown in real traded prices for that day. The cached raw prices are never modified, and every adjustment is recorded in the audit log as `PRICE_DISCONTINUITY_ADJUSTED` |
-| ETFs | Tracked together with stocks, using the same rules, from NSE's official ETF list (`eq_etfseclist.csv`), and labelled `ETF` in the Type column. Liquid and overnight ETFs are left out, because their price stays near ₹1,000 and moves only by paise, which makes RSI meaningless. Change this with `etf_exclude_categories`, or set `include_etfs = false` to turn ETFs off. ETFs are sized by AUM from AMFI instead of market cap (see the next row) |
-| ETF AUM (AMFI) | Each ETF's ISIN from the NSE list is matched to its AMFI scheme code using AMFI's daily NAV file (`NAVAll.txt`). AUM comes from AMFI's scheme-wise average-AUM data, the source behind amfiindia.com/aum-data/average-aum. AMFI publishes it per quarter, as the quarter's average, about a month after the quarter ends. The **Size Basis** column shows which figure applies to each row, for example `AUM (AMFI avg Apr-Jun 2026)`. Stocks (by market cap) and ETFs (by AUM) are ranked together in one "Market Cap / AUM" column. ETFs listed after the latest published quarter have no AUM until the next one. AUM is refreshed weekly, in one bulk download |
-| Market cap, volume, close | Both tables are sorted by market cap, largest first. Market cap = shares outstanding × closing price, shown in ₹ crore. Share counts come from Yahoo and are refreshed every 7 days, or right away after a split or bonus. Volume and close are for the stock's last trading day. For completed records, market cap and volume are frozen on the crossover date. Stocks Yahoo has no share count for show a blank market cap and are listed last |
-| Audit trail | `audit_log` stores every event. `daily_observations` stores CMP, SMA 50 and RSI for every tracked stock on every day |
-| Atomic and repeatable | Each trading day is one database transaction. Re-running is harmless, and alerts go through an outbox so failed sends are retried |
+---
 
-### Status values
+## Configuration
 
-* **Active list:** `PENDING_START`, `ACTIVE`, `DATA_MISSING`, `INSUFFICIENT_DATA` (fewer than 50 bars so far)
-* **History:** `SMA50_CROSSED`, `DELISTED`, `DATA_UNAVAILABLE`
+Settings live in a TOML file: `config.example.toml` for local runs and `config.cloud.toml` for GitHub Actions. Any value written as `${ENV_VAR}` is read from the environment, so secrets never go in the file.
 
-## Notifications
+| Key | Default | Meaning |
+|---|---|---|
+| `strategy.rsi_period` / `rsi_threshold` | 14 / 30 | Entry signal |
+| `strategy.sma_period` | 50 | Exit signal |
+| `strategy.min_history_bars` | 100 | Minimum history before a stock can be screened |
+| `strategy.max_daily_move` | 0.35 | Size of one-day jump treated as a corporate action or bad data |
+| `strategy.min_close` / `min_avg_volume` | 0 / 0 | Optional penny-stock and liquidity filters |
+| `data.series` | `["EQ"]` | NSE series in the universe |
+| `data.include_etfs` / `etf_exclude_categories` | `true` / liquid & overnight | ETF coverage |
+| `data.min_coverage` | 0.9 | Share of stocks that must have a price before a day is processed |
+| `data.market_close_cutoff` | `16:00` | Time (IST) after which today's close is treated as final |
 
-Configure in `config.toml`. Any combination works:
-console, Telegram, a webhook (Slack, Discord, Teams or ntfy) and email (SMTP). Crossover alert:
+---
+
+## Project structure
 
 ```
-Stock: ABC (ABC Ltd)
-RSI Entry Date: 24-Sep-2026
-RSI: 28.5
-Crossover Date: 03-Oct-2026
-CMP: ₹125.40
-SMA 50: ₹124.80
-Trading Days Taken: 7
-Status: SMA 50 Crossed
+nse_monitor/
+  strategy.py        core rules: screening, tracking, crossover (no data-source code)
+  indicators.py      Wilder RSI, SMA (causal)
+  cleaning.py        corporate-action / bad-print repair
+  engine.py          daily pipeline: universe → prices → calendar → per-day processing → alerts → reports
+  storage.py         SQLite: tracking, history, audit log, alert outbox, price cache
+  data/              data-source interface and providers (NSE + Yahoo, AMFI, CSV)
+  notifications.py   alert formatting and delivery (console, Telegram, webhook, email)
+  reports.py         tables, CSV and HTML export
+  cloud_state.py     splits the database into state and price cache for cloud runs
+  cli.py             command-line interface
+streamlit_app.py     dashboard
+.github/workflows/   GitHub Actions schedule
+tests/               test suite
+DEPLOY.md            step-by-step deployment guide
 ```
 
-With `daily_summary = true` you also get one summary per run listing new entries and crossovers.
+---
 
-## Swapping the data source
+## Extending: replacing the data source
 
-The strategy only talks to `MarketDataSource` (`nse_monitor/data/base.py`), which has three methods:
-`list_instruments()`, `fetch_daily_bars(symbols, start, end)` and `fetch_trading_days(start, end)`.
-To add a new provider (NSE bhavcopy, a broker API such as Kite or Upstox, or a paid feed),
-implement those methods and register the provider in `nse_monitor/data/__init__.py`.
-`fetch_daily_bars` must return split-adjusted closes. `data/csv_source.py` is a small working
-example that reads local CSV files.
+The strategy depends only on the `MarketDataSource` interface in `nse_monitor/data/base.py`:
 
-The default provider uses NSE's official `EQUITY_L.csv` for the stock list and Yahoo Finance
-(`SYMBOL.NS`) for prices.
+```python
+list_instruments() -> list[Instrument]
+fetch_daily_bars(symbols, start, end) -> {symbol: DataFrame[close, volume]}   # split-adjusted closes
+fetch_trading_days(start, end) -> list[date]
+fetch_shares_outstanding(symbols)  # optional
+fetch_fund_aum(isins)              # optional
+```
 
-## Caveats
+To switch to an official or broker feed (NSE bhavcopy, Kite, Upstox and so on), implement these methods and register the provider in `nse_monitor/data/__init__.py`. The strategy code doesn't change. `data/csv_source.py` is a minimal working example.
 
-* Yahoo Finance is free and unofficial. It sometimes has gaps or delays. The coverage check,
-  the retry run and catch-up limit the damage, but for production money decisions use an
-  official or broker feed.
-* `replay` uses today's stock list, so stocks delisted before today are missing from the
-  replay (survivorship bias). Live daily runs are not affected.
-* Values stored at crossover time are kept as they were. If a split happens later, those
-  stored prices are not rescaled.
+---
 
-## Tests
+## Testing
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover RSI correctness and causality, the full entry→crossover cycle, live day-by-day
-runs matching a replay exactly, holidays, suspensions, delisting, split adjustment, re-entry,
-idempotent re-runs, alert retry and deferral of incomplete days.
-#   s t r a t e g y  
- 
+32 tests cover:
+- RSI correctness and causality
+- the full entry → crossover cycle
+- day-by-day runs matching a replay exactly
+- holidays and holiday placeholder bars
+- suspensions and delistings
+- unadjusted split repair
+- ETF parsing and AUM ranking
+- re-entry after exit, and re-runs having no effect
+- alert retry and outbox suppression
+- incomplete-day deferral
+- the Streamlit dashboard, rendered headlessly
+
+---
+
+## Limitations
+
+- **Free data feeds.** Yahoo Finance and the NSE archive files are unofficial or best-effort sources. The data-quality safeguards above reduce the impact, but for decisions with money at stake, use an official or broker feed.
+- **Quarterly ETF AUM.** AMFI publishes scheme-level AUM only as a quarterly average, about a month after each quarter ends. ETFs listed after the latest quarter show no AUM until the next one.
+- **Replay uses today's stock list.** Stocks delisted before the replay date are absent (survivorship bias). Live daily runs are not affected.
+- **Point-in-time values.** Values recorded at crossover are kept as they were. Market caps in replayed history use current share counts.
+
+> **Disclaimer:** This project is for research and educational use. It is not investment advice.
