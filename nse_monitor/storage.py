@@ -341,6 +341,15 @@ class Repository:
             (symbol, _d(start), _now()),
         )
 
+    def fill_missing_bars(self, d: date, bars: pd.DataFrame, symbols: set[str]) -> int:
+        """Insert bars for ``d`` only where none exists (never overwrites). Returns rows added."""
+        rows = [(s, _d(d), float(r.close), None if pd.isna(r.volume) else float(r.volume))
+                for s, r in bars.iterrows() if s in symbols]
+        before = self.conn.total_changes
+        with self.transaction():
+            self.conn.executemany("INSERT OR IGNORE INTO prices(symbol, date, close, volume) VALUES (?,?,?,?)", rows)
+        return self.conn.total_changes - before
+
     def load_all_prices(self) -> dict[str, pd.DataFrame]:
         df = pd.read_sql_query("SELECT symbol, date, close, volume FROM prices ORDER BY symbol, date", self.conn)
         out = {}

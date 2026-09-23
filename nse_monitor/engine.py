@@ -73,6 +73,7 @@ class Engine:
 
         symbols = sorted(set(universe) | self.repo.active_symbols())
         self._refresh_prices(symbols, first_needed, as_of)
+        self._fill_recent_days(symbols, first_needed, as_of)
         calendar = self._sync_calendar(first_needed - timedelta(days=10), as_of, symbols)
 
         days = [d for d in calendar if first_needed <= d <= as_of and not self.repo.is_processed(d)]
@@ -219,6 +220,30 @@ class Engine:
                 log.error("ETF AUM fetch failed: %s", exc)
                 self.repo.audit("AUM_FETCH_FAILED", trade_date=today, error=str(exc)[:300])
         self.repo.refresh_market_caps()
+
+    def _fill_recent_days(self, symbols: list[str], first_needed: date, as_of: date) -> None:
+        """Yahoo can take 12+ hours to complete a session. For recent unprocessed weekdays that
+        are still below the coverage threshold, fill the missing bars from the exchange's
+        official end-of-day file. Existing bars are never overwritten."""
+        start = max(first_needed, as_of - timedelta(days=self.cfg.data.official_fill_days))
+        counts = self.repo.bar_counts_by_date(start, as_of)
+        wanted, need = set(symbols), self.cfg.data.min_coverage * len(symbols)
+        d = start
+        while d <= as_of:
+            if d.weekday() < 5 and counts.get(d, 0) < need and not self.repo.is_processed(d):
+                try:
+                    bars = self.source.fetch_official_day(d)
+                except Exception as exc:
+                    log.warning("Official end-of-day file for %s unavailable: %s", d, exc)
+                    bars = None
+                if bars is not None and len(bars):
+                    added = self.repo.fill_missing_bars(d, bars, wanted)
+                    if added:
+                        log.info("%s: filled %d missing bars from the official end-of-day file "
+                                 "(had %d of %d)", d, added, counts.get(d, 0), len(symbols))
+                        self.repo.audit("OFFICIAL_EOD_FILL", trade_date=d, bars_added=added,
+                                        had_before=counts.get(d, 0))
+            d += timedelta(days=1)
 
     def _corporate_action(self, symbol: str, bars: pd.DataFrame) -> bool:
         cached = self.repo.get_prices(symbol, bars.index.min(), bars.index.max())

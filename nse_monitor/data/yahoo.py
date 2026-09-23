@@ -6,6 +6,7 @@
   splits/bonuses (not dividends), which is what we want for RSI / SMA.
 * Calendar: sessions of the NIFTY 50 index (``^NSEI``).
 * ETF AUM:  AMFI (see amfi.py).
+* Gap fill: NSE bhavcopy for recent sessions Yahoo has not completed yet (see bhavcopy.py).
 """
 from __future__ import annotations
 
@@ -122,6 +123,11 @@ class YahooNseSource(MarketDataSource):
             found = {s: v for s, v in pool.map(one, symbols) if v}
         log.info("Shares outstanding: %d of %d symbols", len(found), len(symbols))
         return found
+
+    def fetch_official_day(self, d: date) -> pd.DataFrame | None:
+        from .bhavcopy import fetch_bhavcopy
+
+        return fetch_bhavcopy(d, self.series)
 
     def fetch_fund_aum(self, isins: Iterable[str]) -> tuple[str | None, dict[str, float]]:
         from .amfi import AmfiClient

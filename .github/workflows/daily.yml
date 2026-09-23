@@ -6,6 +6,9 @@ on:
   schedule:
     - cron: "0 11 * * 1-5"   # 16:30 IST (11:00 UTC), Mon-Fri
     - cron: "0 14 * * 1-5"   # 19:30 IST retry, in case prices were published late
+    - cron: "0 3 * * 2-6"    # 08:30 IST next morning (Tue-Sat), before the 09:15 open: NSE's
+                             # official end-of-day file is reliably out by then, so the previous
+                             # session is always on the dashboard when the market opens
   workflow_dispatch:         # "Run workflow" button for manual runs
 
 permissions:

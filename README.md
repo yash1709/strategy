@@ -54,14 +54,14 @@ AMFI ETF AUM ────────────┘      (entry)           (fro
 **Deployment:**
 
 ```
-GitHub Actions (Mon–Fri 16:30 & 19:30 IST)
+GitHub Actions (Mon–Fri 16:30 & 19:30 IST, plus 08:30 IST next morning)
    restore state from `data` branch ─▶ python -m nse_monitor run ─▶ publish state to `data` branch
                                                                           │
 Streamlit Community Cloud ◀── reads state.db (refreshed every 5 min) ─────┘
    https://strategy-gmk9uegg9dtzvennq7xyv4.streamlit.app/
 ```
 
-- **GitHub Actions** runs the job twice every weekday, entirely in the cloud; no local machine is involved.
+- **GitHub Actions** runs the job in the cloud three times per trading day (16:30, 19:30, and 08:30 the next morning); no local machine is involved.
 - **Tracking state** (active list, history, audit log) is kept in the repository's [`data`](https://github.com/yash1709/strategy/tree/data) branch as a 1.6 MB SQLite file. Only the latest version is kept, so repository history stays small. Every run's state is also saved as a 30-day workflow artifact.
 - **The price cache** (about 30 MB) lives in the GitHub Actions cache. If it is ever evicted, the next run re-downloads prices in about 3 minutes.
 - **The Streamlit dashboard** reads the published state directly from GitHub.
@@ -95,6 +95,7 @@ Streamlit Community Cloud ◀── reads state.db (refreshed every 5 min) ─�
 | Equity universe | NSE [`EQUITY_L.csv`](https://archives.nseindia.com/content/equities/EQUITY_L.csv) | Every run |
 | ETF universe | NSE [`eq_etfseclist.csv`](https://archives.nseindia.com/content/equities/eq_etfseclist.csv) | Every run |
 | Daily closes and volume | Yahoo Finance (`SYMBOL.NS`) | Every run, re-downloading the last 20 days |
+| Recent sessions Yahoo hasn't completed | NSE official end-of-day file ([bhavcopy](https://archives.nseindia.com/products/content/sec_bhavdata_full_23092026.csv)) | Recent days only, filling gaps and never overwriting Yahoo |
 | Market cap (stocks) | Shares outstanding (Yahoo) × latest close | Share counts weekly, or right after a split |
 | AUM (ETFs) | [AMFI](https://www.amfiindia.com/aum-data/average-aum) scheme-wise quarterly average AUM, matched to each ETF by ISIN | Weekly check; AMFI publishes quarterly |
 
@@ -104,7 +105,7 @@ Free data feeds have real defects. Each of these was found in production data an
 |---|---|
 | **Holiday placeholder bars.** Yahoo publishes zero-volume bars that repeat the previous close on NSE holidays, e.g. 14-Sep-2026 | Discarded. A day counts as a trading session only if at least half of the stocks actually traded |
 | **Unadjusted splits and demergers.** For example 1:100 ETF unit splits (IVZINGOLD, LICMFGOLD) and demergers (VEDL, RAYMOND) | NSE price bands cap a normal day's move at 20%, so a one-day move beyond ±35% is a corporate action. Earlier prices are rescaled to remove the jump, using the exact split/bonus ratio when it matches one. Every adjustment is recorded in the audit log |
-| **Late or partial data** | A day is processed only once at least 90% of stocks have a price for it. A permanent gap is processed once later days are complete, and logged |
+| **Late or partial data.** Yahoo can take 12+ hours to fill in a session: on 24-Sep 05:00 IST it had 23-Sep closes for only 31% of symbols | Missing bars for recent days are filled from NSE's official bhavcopy, which had 99.9% coverage and matches Yahoo's closes exactly. A day is processed only once at least 90% of stocks have a price for it. A permanent gap is processed once later days are complete, and logged |
 | **Suspensions and delistings** | Missing days still count as trading days. Stocks that stay missing are flagged, then closed out, and delisted stocks move to history |
 | **Retroactive corporate-action adjustments by the provider** | Detected by comparing re-downloaded prices with the cache; that stock's full history is then downloaded again |
 | **Liquid and overnight ETFs** | Excluded by default: the price stays near ₹1,000 and moves by paise, so RSI is meaningless |
@@ -128,7 +129,7 @@ Streamlit Community Cloud puts apps to sleep after a period with no visitors. Th
 
 | | |
 |---|---|
-| Schedule | Mon–Fri **16:30 IST** (main) and **19:30 IST** (retry for late data), via [GitHub Actions](https://github.com/yash1709/strategy/actions/workflows/daily.yml) |
+| Schedule | Mon–Fri **16:30 IST** and **19:30 IST**, plus **08:30 IST the next morning** (Tue–Sat), via [GitHub Actions](https://github.com/yash1709/strategy/actions/workflows/daily.yml). By the 09:15 market open, the previous session is always on the dashboard |
 | Manual run | Actions → *Daily NSE monitor* → **Run workflow** |
 | Typical duration | About 2–4 minutes, including a full price re-download if the cache was evicted |
 | Holidays and weekends | Detected from the data; nothing is processed and nothing breaks |

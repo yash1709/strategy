@@ -53,6 +53,12 @@ class MarketDataSource(ABC):
         Optional: providers without this data return {} and market cap shows as blank."""
         return {}
 
+    def fetch_official_day(self, d: date) -> pd.DataFrame | None:
+        """Official end-of-day bars for one session (index = symbol; columns close, volume),
+        used to fill recent days the main price feed has not completed yet. Optional:
+        return None if unavailable (no file yet, holiday, or not supported)."""
+        return None
+
     def fetch_fund_aum(self, isins: Iterable[str]) -> tuple[str | None, dict[str, float]]:
         """(period label, {ISIN: AUM in rupees}) for ETFs. Optional: default is no AUM."""
         return None, {}

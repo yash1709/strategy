@@ -72,6 +72,11 @@ class InMemorySource(MarketDataSource):
     shares: dict[str, float] = {}
     shares_error: Exception | None = None
 
+    official: dict = {}  # date -> DataFrame(index=symbol, close, volume), like NSE's bhavcopy
+
+    def fetch_official_day(self, d):
+        return self.official.get(d)
+
     def fetch_shares_outstanding(self, symbols):
         if self.shares_error:
             raise self.shares_error

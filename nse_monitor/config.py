@@ -41,6 +41,7 @@ class DataConfig:
     corp_action_tolerance: float = 0.005 # relative close mismatch on overlap => full re-download
     batch_size: int = 100
     market_close_cutoff: str = "16:00"   # IST; before this, today's bar is not treated as final
+    official_fill_days: int = 10         # recent calendar days whose gaps are filled from NSE's bhavcopy
     min_coverage: float = 0.9            # fraction of universe that must have a bar before a new day is processed
     shares_refresh_days: int = 7         # re-fetch shares outstanding (for market cap) after this many days
     reference_symbol: str = "^NSEI"      # index calendar; fallback only (sessions are derived from stock bars)
