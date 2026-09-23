@@ -117,3 +117,5 @@ The default provider uses NSE's official `EQUITY_L.csv` for the stock list and Y
 The tests cover RSI correctness and causality, the full entry→crossover cycle, live day-by-day
 runs matching a replay exactly, holidays, suspensions, delisting, split adjustment, re-entry,
 idempotent re-runs, alert retry and deferral of incomplete days.
+#   s t r a t e g y  
+ 
