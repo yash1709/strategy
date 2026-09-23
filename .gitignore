@@ -1,0 +1,13 @@
+# Leading "/" = only at the repository root. (Unanchored "data/" would also hide
+# the nse_monitor/data/ source package.)
+/.venv/
+__pycache__/
+/.pytest_cache/
+/.idea/
+/data/
+/logs/
+/reports/
+/cloud/
+/publish/
+/config.toml
+/.streamlit/secrets.toml

@@ -1,0 +1,49 @@
+# Copy to config.toml and edit. Relative paths are resolved against this file's folder.
+# Any value written as "${ENV_VAR}" is read from the environment (keep secrets out of the file).
+
+db_path = "data/nse_monitor.db"
+reports_dir = "reports"
+log_dir = "logs"
+
+[strategy]
+rsi_period = 14
+rsi_threshold = 30.0            # enter when RSI(14) < 30
+max_daily_move = 0.35           # one-day moves beyond this (NSE bands cap at 20%) = unadjusted split/demerger/bad print
+sma_period = 50                 # exit when close > SMA(50)
+min_history_bars = 100          # ignore stocks with fewer daily bars (new listings)
+min_close = 0.0                 # e.g. 10.0 to skip penny stocks
+min_avg_volume = 0.0            # e.g. 50000 to skip illiquid stocks (20-day average volume)
+stale_after_missing_days = 5    # flag DATA_MISSING after this many sessions with no bar
+remove_after_missing_days = 60  # then close as DATA_UNAVAILABLE
+
+[data]
+source = "yahoo"                # "yahoo" (NSE list + Yahoo Finance) or "csv"
+csv_dir = "data_csv"
+series = ["EQ"]                 # add "BE", "BZ", "SM" etc. to widen the universe
+include_etfs = true             # also track NSE ETFs (equity, gold, silver, debt, international)
+etf_exclude_categories = ["Overnight ETFs and Liquid ETF"]   # price pinned at ~1000: RSI is noise
+history_days = 550
+refresh_overlap_days = 20
+corp_action_tolerance = 0.005
+batch_size = 100
+market_close_cutoff = "16:00"   # IST
+min_coverage = 0.9
+shares_refresh_days = 7         # market cap = shares outstanding x close
+reference_symbol = "^NSEI"
+
+[notify]
+console = true
+daily_summary = true
+# Telegram: create a bot with @BotFather, then get your chat id from @userinfobot
+telegram_bot_token = "${TELEGRAM_BOT_TOKEN}"
+telegram_chat_id = "${TELEGRAM_CHAT_ID}"
+# Slack / Discord / Teams / ntfy incoming-webhook URL
+webhook_url = "${NSE_MONITOR_WEBHOOK}"
+# Email (e.g. Gmail: smtp.gmail.com, 587, app password)
+smtp_host = ""
+smtp_port = 587
+smtp_user = ""
+smtp_password = "${SMTP_PASSWORD}"
+smtp_use_tls = true
+email_from = ""
+email_to = []

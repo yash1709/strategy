@@ -1,0 +1,103 @@
+# Runs the NSE monitor every weekday in the cloud and publishes the result to the
+# `data` branch, which the Streamlit dashboard reads. See DEPLOY.md.
+name: Daily NSE monitor
+
+on:
+  schedule:
+    - cron: "0 11 * * 1-5"   # 16:30 IST (11:00 UTC), Mon-Fri
+    - cron: "0 14 * * 1-5"   # 19:30 IST retry, in case prices were published late
+  workflow_dispatch:         # "Run workflow" button for manual runs
+
+permissions:
+  contents: write            # push to the data branch
+
+concurrency:
+  group: nse-monitor         # never two runs at once (they share state)
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TZ: Asia/Kolkata
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Fetch tracking state from the data branch
+        run: |
+          mkdir -p cloud data
+          if git ls-remote --exit-code --heads origin data >/dev/null; then
+            git fetch --depth=1 origin data
+            git show origin/data:state.db > cloud/state.db
+            echo "Restored state.db ($(stat -c%s cloud/state.db) bytes)"
+          else
+            echo "::warning::No data branch yet - starting with an empty tracking list"
+          fi
+
+      - name: Restore price cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cloud/prices.db
+          key: prices-${{ github.run_id }}
+          restore-keys: prices-
+
+      - name: Assemble database
+        run: python -m nse_monitor.cloud_state unpack --db data/nse_monitor.db --state cloud/state.db --prices cloud/prices.db
+
+      - name: Run monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NSE_MONITOR_WEBHOOK: ${{ secrets.NSE_MONITOR_WEBHOOK }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: python -m nse_monitor --config config.cloud.toml run
+
+      - name: Split state and prices
+        run: python -m nse_monitor.cloud_state pack --db data/nse_monitor.db --state cloud/state.db --prices cloud/prices.db --meta cloud/meta.json
+
+      - name: Save price cache
+        uses: actions/cache/save@v4
+        with:
+          path: cloud/prices.db
+          key: prices-${{ github.run_id }}
+
+      - name: Publish to data branch
+        run: |
+          mkdir publish && cd publish
+          cp ../cloud/state.db ../cloud/meta.json .
+          cp -r ../reports .
+          cat > README.md <<'EOF'
+          # data branch (generated - do not edit)
+          Updated by the "Daily NSE monitor" workflow after every run and read by the Streamlit
+          dashboard. `state.db` holds the tracking list, crossover history and audit log;
+          `reports/` holds the CSV exports. Only the latest version is kept (force-pushed).
+          EOF
+          git init -q -b data
+          git config user.name "nse-monitor-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Data as of $(python -c "import json;print(json.load(open('meta.json'))['last_processed_day'])") (run ${{ github.run_id }})"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+          cat meta.json
+
+      - name: Keep a backup of this run's state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: state-${{ github.run_id }}
+          path: |
+            cloud/state.db
+            cloud/meta.json
+            logs/
+          retention-days: 30
+          if-no-files-found: ignore

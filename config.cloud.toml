@@ -1,0 +1,18 @@
+# Settings for the GitHub Actions run (see .github/workflows/daily.yml).
+# Secrets are read from repository secrets via environment variables; none are stored here.
+db_path = "data/nse_monitor.db"
+reports_dir = "reports"
+log_dir = "logs"
+
+[data]
+series = ["EQ"]
+include_etfs = true
+etf_exclude_categories = ["Overnight ETFs and Liquid ETF"]
+
+[notify]
+console = true                                  # appears in the workflow log
+daily_summary = true
+telegram_bot_token = "${TELEGRAM_BOT_TOKEN}"    # optional repository secrets
+telegram_chat_id = "${TELEGRAM_CHAT_ID}"
+webhook_url = "${NSE_MONITOR_WEBHOOK}"
+smtp_password = "${SMTP_PASSWORD}"
