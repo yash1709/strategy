@@ -4,10 +4,12 @@ name: Daily NSE monitor
 
 on:
   schedule:
-    - cron: "0 12 * * 1-5"   # 17:30 IST (12:00 UTC), Mon-Fri
-    - cron: "45 18 * * 1-5"  # 00:15 IST (18:45 UTC) the night after each weekday session, i.e.
-                             # Tue-Sat 00:15 IST: after NSE's end-of-day file (~23:55 IST) is out
-    - cron: "0 3 * * 2-6"    # 08:30 IST next morning (Tue-Sat), before the 09:15 open: NSE's
+    # Odd minutes on purpose: GitHub queues scheduled runs at the top of the hour and has
+    # started them 4-5 hours late there. Off-peak minutes start much closer to on time.
+    - cron: "7 12 * * 1-5"   # 17:37 IST (12:07 UTC), Mon-Fri
+    - cron: "52 18 * * 1-5"  # 00:22 IST (18:52 UTC) the night after each weekday session, i.e.
+                             # Tue-Sat 00:22 IST: after NSE's end-of-day file (~23:55 IST) is out
+    - cron: "7 3 * * 2-6"    # 08:37 IST next morning (Tue-Sat), before the 09:15 open: NSE's
                              # official end-of-day file is reliably out by then, so the previous
                              # session is always on the dashboard when the market opens
   workflow_dispatch:         # "Run workflow" button for manual runs

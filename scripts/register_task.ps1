@@ -1,13 +1,13 @@
 # Registers a Windows scheduled task that runs the monitor every weekday after NSE close.
 # Times are in this PC's local time zone (set them for IST if the PC is elsewhere).
-# Two triggers: 17:30 Mon-Fri, and 00:15 Tue-Sat (after NSE's end-of-day file for the previous session). Running
+# Two triggers: 17:37 Mon-Fri, and 00:22 Tue-Sat (after NSE's end-of-day file for the previous session). Running
 # twice is safe: already-processed days are skipped, and missed days are caught up.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1
 param(
     [string]$TaskName = "NSE RSI SMA50 Monitor",
-    [string]$MainTime = "17:30",
-    [string]$RetryTime = "00:15"
+    [string]$MainTime = "17:37",
+    [string]$RetryTime = "00:22"
 )
 $root = Split-Path -Parent $PSScriptRoot
 New-Item -ItemType Directory -Force "$root\logs" | Out-Null
