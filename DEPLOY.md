@@ -49,6 +49,27 @@ and `TELEGRAM_CHAT_ID`, or `NSE_MONITOR_WEBHOOK`.
    ```
 4. Click **Deploy**. The link (`https://<name>.streamlit.app`) works in any browser.
 
+## 5. Enable the dashboard's "Run update now" button (optional)
+The dashboard has a password-protected panel that starts the workflow and waits for it to finish.
+It needs two secrets:
+
+1. **Create a GitHub token that can only start this workflow.** Go to
+   https://github.com/settings/personal-access-tokens/new and set:
+   * **Token name:** `nse-monitor-dashboard`. **Expiration:** your choice (for example, 1 year).
+   * **Repository access:** *Only select repositories* → `yash1709/strategy`.
+   * **Permissions → Repository permissions → Actions:** **Read and write**. Leave everything else at *No access*.
+   * Click **Generate token** and copy it (it starts with `github_pat_`).
+2. **Add the secrets to the Streamlit app.** On share.streamlit.io, open the app's **⋮ → Settings → Secrets** and add:
+   ```toml
+   RUN_PASSWORD = "choose-a-strong-password"
+   GITHUB_DISPATCH_TOKEN = "github_pat_..."
+   ```
+   Save. The app restarts in a few seconds.
+
+Anyone can see the panel, but only someone with the password can start a run. The token can do nothing except
+manage workflow runs of this one repository. If the token expires, the panel shows an error: create a
+new one and replace the secret.
+
 ## Good to know
 * **Freshness:** the dashboard shows the latest trading day and when it was last updated. It re-reads the data
   every 5 minutes, and the **Refresh data** button forces an immediate re-read.

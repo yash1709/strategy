@@ -124,6 +124,7 @@ Free data feeds have real defects. Each of these was found in production data an
 - **Historical Crossover Database:** latest exit first, then largest market cap / AUM. Shows the latest 30, with a toggle for the full history.
 - **Active Tracking List:** market cap / AUM, the size basis, CMP (close), volume, RSI date and value, tracking start, SMA 50 and days tracked. It can be filtered by type (stock or ETF), by symbol or company name, and by minimum size.
 - **CSV downloads** for both tables, and a **Refresh** button. Data is otherwise cached for 5 minutes.
+- **▶ Run an update now:** a password-protected panel that starts the cloud job, shows its progress, and loads the new data when it finishes (about 2–4 minutes). Setup is in [DEPLOY.md](DEPLOY.md#5-enable-the-dashboards-run-update-now-button-optional).
 
 Streamlit Community Cloud puts apps to sleep after a period with no visitors. The first visit after that takes about 30 seconds while the app starts.
 

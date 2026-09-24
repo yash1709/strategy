@@ -8,15 +8,21 @@ Data source (first match wins):
 3. ``DEFAULT_GITHUB_REPO`` below (this project's repository), so the hosted app works with no
    secrets at all. Override with a ``DEFAULT_GITHUB_REPO`` secret/env ("" disables it).
 
+Manual runs ("Run update now" panel) need two secrets, set in the Streamlit app settings:
+``RUN_PASSWORD`` (your choice) and ``GITHUB_DISPATCH_TOKEN`` -- a fine-grained GitHub token
+limited to this repository with only "Actions: Read and write". See DEPLOY.md.
+
 Run locally:  streamlit run streamlit_app.py
 """
 from __future__ import annotations
 
+import hmac
 import os
 import sqlite3
 import tempfile
+import time
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +37,11 @@ st.set_page_config(page_title="NSE RSI Monitor", page_icon="📉", layout="wide"
 
 CACHE_SECONDS = 300
 DEFAULT_GITHUB_REPO = "yash1709/strategy"
+WORKFLOW_FILE = "daily.yml"
+RUN_POLL_SECONDS = float(os.environ.get("RUN_POLL_SECONDS", "10"))
+RUN_MAX_WAIT_SECONDS = 15 * 60
+WRONG_PASSWORD_DELAY = float(os.environ.get("WRONG_PASSWORD_DELAY", "2"))
+IST = timezone(timedelta(hours=5, minutes=30))
 DATE_COLS = ["Last Trading Day", "RSI Date", "Tracking Start Date", "Crossover Date", "Exit Date"]
 
 
@@ -43,17 +54,43 @@ def _setting(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
-@st.cache_data(ttl=CACHE_SECONDS, show_spinner="Fetching latest data…")
-def _download_state(repo: str, branch: str, token: str) -> bytes:
+@st.cache_data(ttl=CACHE_SECONDS, show_spinner=False)
+def _branch_sha(repo: str, branch: str, token: str) -> str | None:
+    """Latest commit of the data branch. Downloading state.db by commit id avoids the ~5 minute
+    cache on branch URLs, so a just-finished run shows up immediately."""
+    headers = {"Accept": "application/vnd.github.sha"}
     if token:
-        url = f"https://api.github.com/repos/{repo}/contents/state.db?ref={branch}"
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        resp = requests.get(f"https://api.github.com/repos/{repo}/commits/{branch}", headers=headers, timeout=30)
+        return resp.text.strip() if resp.ok and len(resp.text.strip()) == 40 else None
+    except requests.RequestException:
+        return None
+
+
+@st.cache_data(max_entries=4, show_spinner="Fetching latest data…")
+def _download_at(repo: str, ref: str, token: str) -> bytes:
+    if token:  # private repository
+        url = f"https://api.github.com/repos/{repo}/contents/state.db?ref={ref}"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw"}
     else:
-        url = f"https://raw.githubusercontent.com/{repo}/{branch}/state.db"
-        headers = {}
+        url, headers = f"https://raw.githubusercontent.com/{repo}/{ref}/state.db", {}
     resp = requests.get(url, headers=headers, timeout=60)
     resp.raise_for_status()
     return resp.content
+
+
+def _download_state(repo: str, branch: str, token: str) -> tuple[bytes, str]:
+    """(file bytes, ref used). Uses the exact commit when known; otherwise the branch name."""
+    ref = _branch_sha(repo, branch, token or _setting("GITHUB_DISPATCH_TOKEN")) or branch
+    if ref == branch:  # commit lookup failed: branch URL, cached for CACHE_SECONDS like before
+        return _download_branch(repo, branch, token), ref
+    return _download_at(repo, ref, token), ref
+
+
+@st.cache_data(ttl=CACHE_SECONDS, show_spinner="Fetching latest data…")
+def _download_branch(repo: str, branch: str, token: str) -> bytes:
+    return _download_at.__wrapped__(repo, branch, token)
 
 
 @st.cache_data(ttl=CACHE_SECONDS, show_spinner=False)
@@ -104,14 +141,96 @@ def _csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
+# ---------------------------------------------------------------- manual run (GitHub Actions)
+def _gh(method: str, path: str, token: str, **kwargs) -> requests.Response:
+    return getattr(requests, method)(f"https://api.github.com/repos/{path}", timeout=30, headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"}, **kwargs)
+
+
+def _latest_manual_run(repo: str, token: str) -> dict | None:
+    resp = _gh("get", f"{repo}/actions/workflows/{WORKFLOW_FILE}/runs", token, params={"per_page": 1})
+    resp.raise_for_status()
+    runs = resp.json().get("workflow_runs") or []
+    return runs[0] if runs else None
+
+
+def _ist(ts: str) -> str:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(IST).strftime("%d-%b %H:%M IST")
+
+
+def _run_panel(repo: str) -> None:
+    token, password = _setting("GITHUB_DISPATCH_TOKEN"), _setting("RUN_PASSWORD")
+    page = f"https://github.com/{repo}/actions/workflows/{WORKFLOW_FILE}"
+    with st.expander("▶ Run an update now"):
+        if not (token and password and repo):
+            st.info(f"Manual runs from the dashboard are not set up yet (see DEPLOY.md). "
+                    f"You can start one on GitHub: [Daily NSE monitor → Run workflow]({page}).")
+            return
+        try:
+            latest = _latest_manual_run(repo, token)
+        except requests.RequestException as exc:
+            st.error(f"Could not reach GitHub: {exc}")
+            return
+        if latest and latest["status"] != "completed":
+            st.info(f"An update is already running (started {_ist(latest['created_at'])}). "
+                    f"[View progress]({latest['html_url']})")
+            if st.button("Check again"):
+                st.rerun()
+            return
+        if latest:
+            st.caption(f"Last run: {_ist(latest['created_at'])} · {latest.get('conclusion') or latest['status']} · "
+                       f"[details]({latest['html_url']})")
+        with st.form("run_form", clear_on_submit=True):
+            entered = st.text_input("Password", type="password", key="run_password")
+            go = st.form_submit_button("▶ Run update now", type="primary", key="run_submit")
+        if not go:
+            return
+        if not hmac.compare_digest(entered.encode(), password.encode()):
+            time.sleep(WRONG_PASSWORD_DELAY)  # slows down guessing
+            st.error("Wrong password.")
+            return
+        started = datetime.now(timezone.utc) - timedelta(seconds=5)
+        resp = _gh("post", f"{repo}/actions/workflows/{WORKFLOW_FILE}/dispatches", token, json={"ref": "main"})
+        if resp.status_code != 204:
+            st.error(f"GitHub refused the request ({resp.status_code}): {resp.text[:200]}. "
+                     "Check that GITHUB_DISPATCH_TOKEN has 'Actions: Read and write' on this repository.")
+            return
+        with st.status("Update requested…", expanded=True) as box:
+            run, deadline = None, time.monotonic() + RUN_MAX_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                time.sleep(RUN_POLL_SECONDS)
+                try:
+                    candidate = _latest_manual_run(repo, token)
+                except requests.RequestException:
+                    continue
+                if candidate and datetime.fromisoformat(candidate["created_at"].replace("Z", "+00:00")) >= started:
+                    run = candidate
+                    box.update(label=f"Update {run['status'].replace('_', ' ')}… (usually 2–4 minutes)")
+                    if run["status"] == "completed":
+                        break
+            if not run or run["status"] != "completed":
+                box.update(label="Still running. Check back in a few minutes.", state="running")
+                st.markdown(f"[View progress on GitHub]({run['html_url'] if run else page})")
+                return
+            if run.get("conclusion") != "success":
+                box.update(label=f"Update finished: {run.get('conclusion')}", state="error")
+                st.markdown(f"[See what happened]({run['html_url']})")
+                return
+            box.update(label="Update complete. Loading the new data…", state="complete")
+        st.cache_data.clear()
+        time.sleep(min(RUN_POLL_SECONDS, 3))  # let GitHub serve the freshly published data file
+        st.rerun()
+
+
 # ---------------------------------------------------------------- load data
 local = os.environ.get("NSE_MONITOR_DB", "data/nse_monitor.db")
 repo_name = _setting("GITHUB_REPO") or ("" if Path(local).exists() else _setting("DEFAULT_GITHUB_REPO", DEFAULT_GITHUB_REPO))
 try:
     if repo_name:
         branch, token = _setting("DATA_BRANCH", "data"), _setting("GITHUB_TOKEN")
-        payload = _download_state(repo_name, branch, token)
-        active, hist, stats, info = load_tables(f"gh:{repo_name}:{branch}", payload, None)
+        payload, ref = _download_state(repo_name, branch, token)
+        active, hist, stats, info = load_tables(f"gh:{repo_name}:{ref}", payload, None)
         source = f"GitHub `{repo_name}` · branch `{branch}`"
     else:
         if not Path(local).exists():
@@ -146,6 +265,7 @@ m[4].metric("Latest trading day", fmt_date(info.get("last_day")))
 if st.button("↻ Refresh data", help=f"Data is cached for {CACHE_SECONDS // 60} minutes"):
     st.cache_data.clear()
     st.rerun()
+_run_panel(_setting("GITHUB_REPO") or _setting("DEFAULT_GITHUB_REPO", DEFAULT_GITHUB_REPO))
 
 # ---------------------------------------------------------------- history (first)
 st.subheader("Historical crossover database")
