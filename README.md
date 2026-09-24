@@ -54,14 +54,14 @@ AMFI ETF AUM ────────────┘      (entry)           (fro
 **Deployment:**
 
 ```
-GitHub Actions (Mon–Fri 17:30 & 23:30 IST, plus 08:30 IST next morning)
+GitHub Actions (Mon–Fri 17:30 IST, then 00:15 & 08:30 IST the next day)
    restore state from `data` branch ─▶ python -m nse_monitor run ─▶ publish state to `data` branch
                                                                           │
 Streamlit Community Cloud ◀── reads state.db (refreshed every 5 min) ─────┘
    https://strategy-gmk9uegg9dtzvennq7xyv4.streamlit.app/
 ```
 
-- **GitHub Actions** runs the job in the cloud three times per trading day (17:30, 23:30, and 08:30 the next morning); no local machine is involved.
+- **GitHub Actions** runs the job in the cloud three times per trading day (17:30 the same day, then 00:15 and 08:30 the next day); no local machine is involved.
 - **Tracking state** (active list, history, audit log) is kept in the repository's [`data`](https://github.com/yash1709/strategy/tree/data) branch as a 1.6 MB SQLite file. Only the latest version is kept, so repository history stays small. Every run's state is also saved as a 30-day workflow artifact.
 - **The price cache** (about 30 MB) lives in the GitHub Actions cache. If it is ever evicted, the next run re-downloads prices in about 3 minutes.
 - **The Streamlit dashboard** reads the published state directly from GitHub.
@@ -129,7 +129,7 @@ Streamlit Community Cloud puts apps to sleep after a period with no visitors. Th
 
 | | |
 |---|---|
-| Schedule | Mon–Fri **17:30 IST** and **23:30 IST**, plus **08:30 IST the next morning** (Tue–Sat), via [GitHub Actions](https://github.com/yash1709/strategy/actions/workflows/daily.yml). By the 09:15 market open, the previous session is always on the dashboard |
+| Schedule | Mon–Fri **17:30 IST**, then **00:15 IST** (after NSE's end-of-day file, published around 23:55) and **08:30 IST** the next day (Tue–Sat), via [GitHub Actions](https://github.com/yash1709/strategy/actions/workflows/daily.yml). By the 09:15 market open, the previous session is always on the dashboard |
 | Manual run | Actions → *Daily NSE monitor* → **Run workflow** |
 | Typical duration | About 2–4 minutes, including a full price re-download if the cache was evicted |
 | Holidays and weekends | Detected from the data; nothing is processed and nothing breaks |

@@ -1,7 +1,7 @@
 # Deploying: GitHub Actions (daily job) + Streamlit Community Cloud (dashboard)
 
 ```
-GitHub Actions, weekdays 17:30 & 23:30 IST, plus 08:30 IST Tue-Sat
+GitHub Actions, weekdays 17:30 IST, then 00:15 and 08:30 IST the following night/morning (Tue-Sat)
   restore state (data branch) + price cache  ->  python -m nse_monitor run  ->  push state to `data` branch
                                                                                    |
 Streamlit Community Cloud  <-- reads data/state.db (refreshes every 5 min) ---------+
@@ -29,7 +29,7 @@ powershell -ExecutionPolicy Bypass -File scripts\seed_data_branch.ps1
 ## 3. Turn on the daily job
 In the repository, open **Actions**. If asked, enable workflows, then choose **Daily NSE monitor → Run workflow**
 to test it once. A normal run takes about 3–5 minutes. The first run takes about 10, because it downloads
-the price history once. After that it runs by itself Mon–Fri at 17:30 and 23:30 IST, and Tue–Sat at 08:30 IST. GitHub may start
+the price history once. After that it runs by itself Mon–Fri at 17:30 IST, and Tue–Sat at 00:15 and 08:30 IST (covering the previous session). GitHub may start
 scheduled runs 5–30 minutes late when it's busy.
 
 Optional alerts: under **Settings → Secrets and variables → Actions**, add `TELEGRAM_BOT_TOKEN`

@@ -5,7 +5,8 @@ name: Daily NSE monitor
 on:
   schedule:
     - cron: "0 12 * * 1-5"   # 17:30 IST (12:00 UTC), Mon-Fri
-    - cron: "0 18 * * 1-5"   # 23:30 IST (18:00 UTC), Mon-Fri: late-evening pass for that day's prices
+    - cron: "45 18 * * 1-5"  # 00:15 IST (18:45 UTC) the night after each weekday session, i.e.
+                             # Tue-Sat 00:15 IST: after NSE's end-of-day file (~23:55 IST) is out
     - cron: "0 3 * * 2-6"    # 08:30 IST next morning (Tue-Sat), before the 09:15 open: NSE's
                              # official end-of-day file is reliably out by then, so the previous
                              # session is always on the dashboard when the market opens

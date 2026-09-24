@@ -1,13 +1,13 @@
 # Registers a Windows scheduled task that runs the monitor every weekday after NSE close.
 # Times are in this PC's local time zone (set them for IST if the PC is elsewhere).
-# Two triggers: 17:30 main run, 23:30 late-evening pass in case the data provider was late. Running
+# Two triggers: 17:30 Mon-Fri, and 00:15 Tue-Sat (after NSE's end-of-day file for the previous session). Running
 # twice is safe: already-processed days are skipped, and missed days are caught up.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1
 param(
     [string]$TaskName = "NSE RSI SMA50 Monitor",
     [string]$MainTime = "17:30",
-    [string]$RetryTime = "23:30"
+    [string]$RetryTime = "00:15"
 )
 $root = Split-Path -Parent $PSScriptRoot
 New-Item -ItemType Directory -Force "$root\logs" | Out-Null
@@ -16,9 +16,10 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$root\scripts\run_daily.ps1`"" `
     -WorkingDirectory $root
 $days = "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"
+$nextDays = "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"  # just after midnight following each session
 $triggers = @(
     New-ScheduledTaskTrigger -Weekly -DaysOfWeek $days -At $MainTime
-    New-ScheduledTaskTrigger -Weekly -DaysOfWeek $days -At $RetryTime
+    New-ScheduledTaskTrigger -Weekly -DaysOfWeek $nextDays -At $RetryTime
 )
 # StartWhenAvailable: if the PC was off/asleep at the scheduled time, run as soon as it is back.
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
