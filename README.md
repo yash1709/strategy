@@ -10,6 +10,10 @@
 
 Updated automatically every NSE trading day. Works in any browser, on any device, with no login.
 
+[![Run now](https://img.shields.io/badge/%E2%96%B6%20Run%20now-trigger%20a%20manual%20update-2EA44F?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/yash1709/strategy/actions/workflows/daily.yml)
+
+To update the data now, click **▶ Run now**, then on GitHub click **Run workflow** → **Run workflow** (green button). This needs you to be signed in as the repository owner. The run takes about 2–4 minutes, and the dashboard shows the new data about 5 minutes later (or click **↻ Refresh data** on the dashboard).
+
 ---
 
 ## Contents
@@ -130,7 +134,7 @@ Streamlit Community Cloud puts apps to sleep after a period with no visitors. Th
 | | |
 |---|---|
 | Schedule | Mon–Fri **17:30 IST**, then **00:15 IST** (after NSE's end-of-day file, published around 23:55) and **08:30 IST** the next day (Tue–Sat), via [GitHub Actions](https://github.com/yash1709/strategy/actions/workflows/daily.yml). By the 09:15 market open, the previous session is always on the dashboard |
-| Manual run | Actions → *Daily NSE monitor* → **Run workflow** |
+| Manual run | [**▶ Run now**](https://github.com/yash1709/strategy/actions/workflows/daily.yml) → **Run workflow** → **Run workflow**. Only the repository owner can run it (sign-in required). Safe to run at any time: already-processed days are skipped |
 | Typical duration | About 2–4 minutes, including a full price re-download if the cache was evicted |
 | Holidays and weekends | Detected from the data; nothing is processed and nothing breaks |
 | Missed runs | The next run catches up on every unprocessed trading day, in order |
