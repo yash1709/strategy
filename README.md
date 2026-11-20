@@ -115,6 +115,8 @@ None of these change the core rules above unless you switch them on.
 
 **AI (optional, off by default).** With `ANTHROPIC_API_KEY` set and `[ai] enabled = true`, the best-quality entries of each run get a short plain-English note and a news-risk flag (LOW/MEDIUM/HIGH) from Claude, using recent Yahoo headlines. The dashboard's **Ask AI** tab turns a question such as *"large caps that crossed in under 5 days"* into a filter that the app itself applies to the tables; Claude never runs code and never sees the data. Any AI failure is logged and skipped; the daily job never depends on it. This costs API credits (about 10 short requests per run at most).
 
+**One-time catch-up.** The first run after an upgrade runs a back-fill once (even if there is no new trading day): forward returns and chart data from the price cache, quality scores for stocks already being tracked (marked "backfilled", without market context), and the last 60 days of market mood and extra signals. It never changes past decisions. `analytics` does the same on demand.
+
 **More data safety.** Per-stock gaps are filled from NSE's official end-of-day file *before* a day is processed (previously only below 90% coverage), Yahoo is cross-checked against the official close (differences over 1% are flagged, never overwritten), and a stock missing from the NSE list needs three missing sessions before it is closed as `DELISTED`. Alert delivery errors no longer store or print the secret URL.
 
 **BSE-only stocks.** With `data.include_bse = true` (on in both shipped configs) the job also tracks stocks that are listed on BSE but not on NSE, using exactly the same rules.
@@ -327,7 +329,7 @@ To switch to an official or broker feed (NSE bhavcopy, Kite, Upstox and so on), 
 .\.venv\Scripts\python.exe -m pytest        # about 1.5 minutes
 ```
 
-113 tests cover the core rules, BSE parsing and universe building, the extra features (quality score, optional exits, breadth and signals, backtest, alerts and filters, gap filling, sectors, health checks, AI helpers with a fake client, CLI) and the dashboard. The AI calls themselves are only tested against a fake client, never the live API. The core tests include:
+117 tests cover the core rules, BSE parsing and universe building, the extra features (quality score, optional exits, breadth and signals, backtest, alerts and filters, gap filling, sectors, health checks, AI helpers with a fake client, CLI) and the dashboard. The AI calls themselves are only tested against a fake client, never the live API. The core tests include:
 - RSI correctness and causality
 - the full entry → crossover cycle
 - day-by-day runs matching a replay exactly

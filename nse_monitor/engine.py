@@ -23,7 +23,7 @@ from .notifications import (Notifier, crossover_message, dispatch_pending, entry
                             near_cross_message, summary_message)
 from .reports import export_reports
 from .storage import Repository
-from .strategy import Event, IndicatorBook, Strategy
+from .strategy import Event, IndicatorBook, Strategy, quality_score
 
 CRORE = 1e7
 
@@ -151,10 +151,53 @@ class Engine:
         log.info("Analytics: %d outcome rows updated, chart data for %d symbols", n, m)
 
     def rebuild_analytics(self) -> None:
-        """Recompute outcomes / chart data from the price cache (CLI ``analytics``; also after upgrades)."""
+        """Recompute outcomes / chart data from the price cache and back-fill what older runs never recorded
+        (CLI ``analytics``; also runs once automatically, see ``_catch_up``). Safe to repeat."""
         book = IndicatorBook(self.repo.load_all_prices(), self.cfg.strategy)
-        self._refresh_analytics(book, self.repo.last_processed_day() or date.today())
+        last = self.repo.last_processed_day() or date.today()
+        self._refresh_analytics(book, last)
+        self._backfill(book, last)
         self._refresh_sectors(date.today())
+
+    def _backfill(self, book: IndicatorBook, last: date, days: int = 60) -> None:
+        """Fill in what runs before these features never recorded, from the price cache:
+        * quality scores for tracked stocks (computed on their RSI day; market context is unknown, so the
+          note omits it and says '(backfilled)');
+        * market mood and extra signals for the last ``days`` processed days that have none.
+        Past decisions are never touched."""
+        q = 0
+        with self.repo.transaction():
+            for rec in self.repo.active():
+                if rec["quality"] is not None:
+                    continue
+                bar = book.bar(rec["symbol"], date.fromisoformat(rec["rsi_date"]))
+                if bar is not None and bar.rsi == bar.rsi:  # not NaN
+                    score, notes = quality_score(bar, None)
+                    self.repo.update_active(rec["id"], quality=score, quality_notes=f"{notes} (backfilled)")
+                    q += 1
+        universe = self.repo.listed_symbols()
+        missing = sorted(date.fromisoformat(p["date"]) for p in self.repo.processed_days_table(days)
+                         if not self.repo.has_breadth(date.fromisoformat(p["date"])))
+        for d in missing:  # oldest first, so the signal clean-up that follows each day keeps the right window
+            with self.repo.transaction():
+                self.strategy._breadth_and_signals(d, book, self.repo, universe)
+        log.info("Back-filled quality for %d tracked stocks and market mood for %d days", q, len(missing))
+
+    def _catch_up(self) -> None:
+        """One-time catch-up after an upgrade: the first run after the new features are deployed may find
+        nothing new to process, which would leave the new dashboard panels empty until the next trading day.
+        Runs once (an audit marker records it) and only when a price cache is available."""
+        if self.repo.has_audit("ANALYTICS_CATCH_UP"):
+            return
+        last = self.repo.last_processed_day()
+        prices = self.repo.load_all_prices() if last else {}
+        if not prices:
+            return
+        book = IndicatorBook(prices, self.cfg.strategy)
+        self._refresh_analytics(book, last)
+        self._backfill(book, last)
+        self._refresh_sectors(date.today())
+        self.repo.audit("ANALYTICS_CATCH_UP", trade_date=last)
 
     def _refresh_sectors(self, today: date) -> None:
         """Sector / industry for tracked and historical symbols (ETFs use their NSE category)."""
@@ -244,6 +287,11 @@ class Engine:
         return notes
 
     def _finish(self, res: RunResult, notify: bool) -> RunResult:
+        try:
+            self._catch_up()
+        except Exception as exc:  # optional extras must never fail the run
+            log.error("Analytics catch-up failed: %s", exc)
+            self.repo.audit("POST_STEP_FAILED", step="catch_up", error=str(exc)[:300])
         self._refresh_market_caps(date.today())
         if notify:
             res.alerts_sent, res.alerts_failed = dispatch_pending(self.repo, self.notifiers,

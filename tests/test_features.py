@@ -217,6 +217,63 @@ def test_empty_backtest_is_safe():
     assert summary["signals"] == 0 and summary["overall"].empty
 
 
+# ------------------------------------------------------------------ one-time catch-up after an upgrade
+def make_pre_upgrade_state(repo):
+    """What a database written before these features looks like: no mood, signals, outcomes, charts, scores."""
+    for table in ("market_breadth", "signals", "outcomes", "chart_bars", "ai_notes"):
+        repo.conn.execute(f"DELETE FROM {table}")
+    repo.conn.execute("UPDATE active_tracking SET quality=NULL, quality_notes=NULL")
+    repo.conn.execute("DELETE FROM audit_log WHERE event='ANALYTICS_CATCH_UP'")
+
+
+def test_catch_up_fills_the_new_panels_when_there_is_nothing_new_to_process(market, make_engine):  # noqa: F811
+    source, cal, closes = market
+    exp = expected_cycle(closes, cal)
+    idx = cal.index(exp["start"])
+    engine, repo, _ = make_engine(source)
+    engine.run(as_of=cal[idx + 2], start=cal[120])           # DIPCO is being tracked
+    processed = len(repo.processed_days_table(500))
+    make_pre_upgrade_state(repo)
+
+    res = engine.run(as_of=cal[idx + 2])                      # nothing new: like the first run after deploying
+    assert res.processed_days == [] and "up to date" in res.skipped_reason
+    assert len(repo.breadth_history(500)) == processed        # market mood rebuilt from the price cache
+    assert not repo.chart_bars("DIPCO").empty
+    [rec] = repo.active()
+    assert 0 <= rec["quality"] <= 100 and rec["quality_notes"].endswith("(backfilled)")
+    assert "market-wide" not in rec["quality_notes"] and "stock-specific" not in rec["quality_notes"]  # context unknown
+    assert repo.has_audit("ANALYTICS_CATCH_UP")
+
+
+def test_catch_up_runs_only_once(market, make_engine):  # noqa: F811
+    source, cal, _ = market
+    engine, repo, _ = make_engine(source)
+    engine.run(as_of=cal[-1], start=cal[120])
+    assert repo.has_audit("ANALYTICS_CATCH_UP")
+    repo.conn.execute("DELETE FROM chart_bars")
+    engine.run(as_of=cal[-1])
+    assert repo.chart_bars("DIPCO").empty                      # not repeated on every run
+
+
+def test_catch_up_never_touches_past_decisions(market, make_engine):  # noqa: F811
+    source, cal, _ = market
+    engine, repo, _ = make_engine(source)
+    engine.run(as_of=cal[-1], start=cal[120])
+    before = ([dict(r) for r in repo.history()], [dict(r) for r in repo.active()])
+    make_pre_upgrade_state(repo)
+    engine.run(as_of=cal[-1])
+    after = ([dict(r) for r in repo.history()], [dict(r) for r in repo.active()])
+    assert before == after
+
+
+def test_catch_up_waits_for_a_price_cache(tmp_path, cfg):
+    from nse_monitor.engine import Engine
+    repo = Repository(tmp_path / "e.db")
+    repo.mark_processed(date(2026, 11, 20), {}, coverage=1.0)  # state exists, but the price cache was evicted
+    Engine(cfg, repo, InMemorySource([], {}, []), [])._catch_up()
+    assert not repo.has_audit("ANALYTICS_CATCH_UP")           # will try again once prices are back
+
+
 # ------------------------------------------------------------------ alerts
 def test_entry_digest_alert_lists_new_entries_with_quality(market, make_engine, cfg):  # noqa: F811
     source, cal, _ = market

@@ -463,6 +463,12 @@ class Repository:
         self.conn.execute("INSERT OR REPLACE INTO market_breadth VALUES (?,?,?,?,?,?,?)",
                           (_d(d), stocks, oversold, overbought, below50, above200, with200))
 
+    def has_breadth(self, d: date) -> bool:
+        return self._one("SELECT 1 AS x FROM market_breadth WHERE date=?", (_d(d),)) is not None
+
+    def has_audit(self, event: str) -> bool:
+        return self._one("SELECT 1 AS x FROM audit_log WHERE event=? LIMIT 1", (event,)) is not None
+
     def breadth_history(self, limit: int = 120) -> list[dict]:
         return self._all("SELECT * FROM market_breadth ORDER BY date DESC LIMIT ?", (limit,))
 

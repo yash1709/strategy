@@ -207,7 +207,7 @@ def _ok(x: float) -> bool:
     return x is not None and not math.isnan(x)
 
 
-def quality_score(bar: Bar, market_oversold_pct: float = 0.0) -> tuple[int, str]:
+def quality_score(bar: Bar, market_oversold_pct: float | None = 0.0) -> tuple[int, str]:
     """A transparent 0-100 heuristic for a fresh RSI<30 entry (not a prediction).
 
     Four parts of up to 25 points each:
@@ -239,7 +239,8 @@ def quality_score(bar: Bar, market_oversold_pct: float = 0.0) -> tuple[int, str]
         notes.append("RSI turning up")
     else:
         turn = 0.0
-    notes.append("market-wide selloff" if market_oversold_pct >= 15 else "stock-specific")
+    if market_oversold_pct is not None:  # None = market context unknown (back-filled scores)
+        notes.append("market-wide selloff" if market_oversold_pct >= 15 else "stock-specific")
     return int(round(depth + vol + trend + turn)), "; ".join(notes)
 
 
