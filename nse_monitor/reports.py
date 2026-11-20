@@ -8,14 +8,16 @@ from pathlib import Path
 
 import pandas as pd
 
+from .data.base import is_bse
 from .notifications import fmt_date
 from .storage import Repository
 
 # Active: largest market cap / AUM first. History: latest exit date first, then largest
 # market cap / AUM within the same date (see Repository.active / .history).
-ACTIVE_COLUMNS = ["Symbol", "Company", "Type", "Market Cap / AUM (₹ Cr)", "Size Basis", "CMP (Close)", "Volume", "Last Trading Day",
-                  "RSI Date", "RSI Value", "Tracking Start Date", "SMA 50", "Days Tracked", "Status"]
-HISTORY_COLUMNS = ["NSE Symbol", "Company Name", "Type", "Market Cap / AUM on Crossover (₹ Cr)", "Size Basis", "RSI Date", "RSI Value",
+ACTIVE_COLUMNS = ["Symbol", "Company", "Type", "Exchange", "Sector", "Market Cap / AUM (₹ Cr)", "Size Basis", "CMP (Close)", "Volume",
+                  "Last Trading Day", "RSI Date", "RSI Value", "Quality", "News Risk", "Tracking Start Date", "SMA 50",
+                  "% Below SMA 50", "Days Tracked", "Status", "Quality Notes"]
+HISTORY_COLUMNS = ["NSE Symbol", "Company Name", "Type", "Exchange", "Sector", "Market Cap / AUM on Crossover (₹ Cr)", "Size Basis", "RSI Date", "RSI Value",
                    "Tracking Start Date", "Crossover Date", "CMP on Crossover Date", "Volume on Crossover Date",
                    "SMA 50 on Crossover Date", "Trading Days Taken", "Status", "Exit Date", "Notes"]
 MONEY = ("CMP (Close)", "SMA 50", "CMP on Crossover Date", "SMA 50 on Crossover Date")
@@ -35,11 +37,21 @@ def _basis(row: dict, value: float | None) -> str:
     return "Market cap"
 
 
+def _below_sma(r: dict) -> float | None:
+    """How far the close is below SMA 50, in % of SMA 50 (positive = still below, negative = above)."""
+    if not r["sma50"] or not r["cmp"]:
+        return None
+    return round((r["sma50"] - r["cmp"]) / r["sma50"] * 100, 2)
+
+
 def active_table(repo: Repository) -> pd.DataFrame:
+    risks = {(n["symbol"], n["rsi_date"]): n["risk"] for n in repo.ai_notes(5000)}
     rows = [{
         "Symbol": r["symbol"],
         "Company": r["company"],
         "Type": r["kind"],
+        "Exchange": "BSE" if is_bse(r["symbol"]) else "NSE",
+        "Sector": r["sector"] or "-",
         "Market Cap / AUM (₹ Cr)": _crore(r["market_cap"]),
         "Size Basis": _basis(r, r["market_cap"]),
         "CMP (Close)": r["cmp"],
@@ -47,13 +59,18 @@ def active_table(repo: Repository) -> pd.DataFrame:
         "Last Trading Day": fmt_date(r["last_eval_date"]),
         "RSI Date": fmt_date(r["rsi_date"]),
         "RSI Value": r["rsi_value"],
+        "Quality": None if r["quality"] is None else int(r["quality"]),
+        "News Risk": risks.get((r["symbol"], r["rsi_date"]), "-"),
         "Tracking Start Date": fmt_date(r["tracking_start_date"]) if r["tracking_start_date"] else "Next trading day",
         "SMA 50": r["sma50"],
+        "% Below SMA 50": _below_sma(r),
         "Days Tracked": r["days_tracked"],
         "Status": r["status"],
+        "Quality Notes": r["quality_notes"] or "",
     } for r in repo.active()]
     df = pd.DataFrame(rows, columns=ACTIVE_COLUMNS)
     df["Volume"] = df["Volume"].astype("Int64")
+    df["Quality"] = df["Quality"].astype("Int64")
     return df
 
 
@@ -62,6 +79,8 @@ def history_table(repo: Repository) -> pd.DataFrame:
         "NSE Symbol": r["symbol"],
         "Company Name": r["company"],
         "Type": r["kind"],
+        "Exchange": "BSE" if is_bse(r["symbol"]) else "NSE",
+        "Sector": r["sector"] or "-",
         "Market Cap / AUM on Crossover (₹ Cr)": _crore(r["market_cap_on_crossover"]),
         "Size Basis": _basis(r, r["market_cap_on_crossover"]),
         "RSI Date": fmt_date(r["rsi_date"]),

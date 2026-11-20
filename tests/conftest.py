@@ -102,6 +102,8 @@ def cfg(tmp_path) -> AppConfig:
     c.db_path = str(tmp_path / "test.db")
     c.notify.console = False
     c.notify.daily_summary = False
+    c.alerts.on_entry = False        # new alert types have their own tests; keep the older tests focused on crossovers
+    c.alerts.on_near_cross = False
     c.data.history_days = 2000
     return c
 

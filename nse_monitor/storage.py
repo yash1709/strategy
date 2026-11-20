@@ -108,6 +108,51 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS ix_audit_symbol ON audit_log(symbol);
 
+-- Market mood: how many stocks were oversold / overbought on each processed day.
+CREATE TABLE IF NOT EXISTS market_breadth (
+    date       TEXT PRIMARY KEY,
+    stocks     INTEGER, oversold INTEGER, overbought INTEGER,
+    below_sma50 INTEGER, above_sma200 INTEGER, with_sma200 INTEGER
+);
+
+-- Extra signals found each day (overbought, 52-week high/low, golden/death cross).
+CREATE TABLE IF NOT EXISTS signals (
+    trade_date TEXT NOT NULL,
+    symbol     TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    value      REAL,
+    PRIMARY KEY (trade_date, symbol, kind)
+) WITHOUT ROWID;
+
+-- What happened after each signal: forward returns from the RSI-day close and from the crossover close.
+CREATE TABLE IF NOT EXISTS outcomes (
+    symbol    TEXT NOT NULL,
+    rsi_date  TEXT NOT NULL,
+    base      TEXT NOT NULL,           -- ENTRY (RSI-day close) | CROSSOVER (crossover-day close)
+    base_date TEXT NOT NULL,
+    ret_5 REAL, ret_10 REAL, ret_20 REAL,
+    bench_5 REAL, bench_10 REAL, bench_20 REAL,   -- equal-weighted return of all stocks over the same window
+    PRIMARY KEY (symbol, rsi_date, base)
+) WITHOUT ROWID;
+
+-- Recent price / SMA 50 / RSI bars for tracked and recently closed symbols (the dashboard has no price cache).
+CREATE TABLE IF NOT EXISTS chart_bars (
+    symbol TEXT NOT NULL,
+    date   TEXT NOT NULL,
+    close  REAL, sma50 REAL, rsi REAL,
+    PRIMARY KEY (symbol, date)
+) WITHOUT ROWID;
+
+-- Claude-written notes on entries (optional feature).
+CREATE TABLE IF NOT EXISTS ai_notes (
+    symbol     TEXT NOT NULL,
+    rsi_date   TEXT NOT NULL,
+    risk       TEXT,                   -- LOW | MEDIUM | HIGH (event risk found in the news)
+    summary    TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, rsi_date)
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS alerts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at  TEXT NOT NULL,
@@ -126,9 +171,12 @@ CREATE TABLE IF NOT EXISTS alerts (
 # Columns added after the first release; created on existing databases by _migrate().
 MIGRATIONS = {
     "instruments": {"shares_outstanding": "REAL", "shares_updated": "TEXT", "kind": "TEXT DEFAULT 'EQUITY'",
-                    "aum": "REAL", "aum_period": "TEXT", "aum_updated": "TEXT"},
-    "active_tracking": {"volume": "REAL", "market_cap": "REAL"},
+                    "aum": "REAL", "aum_period": "TEXT", "aum_updated": "TEXT",
+                    "sector": "TEXT", "industry": "TEXT", "sector_updated": "TEXT"},
+    "active_tracking": {"volume": "REAL", "market_cap": "REAL", "quality": "REAL", "quality_notes": "TEXT",
+                        "near_alerted": "INTEGER NOT NULL DEFAULT 0"},
     "crossover_history": {"volume_on_crossover": "REAL", "market_cap_on_crossover": "REAL"},
+    "processed_days": {"coverage": "REAL"},
 }
 
 
@@ -300,6 +348,10 @@ class Repository:
                        FROM instruments i WHERE i.symbol = crossover_history.symbol)
                    WHERE market_cap_on_crossover IS NULL AND cmp_on_crossover IS NOT NULL""")
 
+    def recent_history_symbols(self, since: date) -> set[str]:
+        return {r["symbol"] for r in self._all("SELECT DISTINCT symbol FROM crossover_history WHERE exit_date >= ?",
+                                               (_d(since),))}
+
     def history_symbols(self) -> set[str]:
         return {r["symbol"] for r in self._all("SELECT DISTINCT symbol FROM crossover_history")}
 
@@ -327,9 +379,16 @@ class Repository:
                  for d, r in bars.iterrows()],
             )
 
-    def bar_counts_by_date(self, start: date, end: date) -> dict[date, int]:
+    def bar_counts_by_date(self, start: date, end: date, nse_only: bool = False) -> dict[date, int]:
+        """Bars per date. ``nse_only`` leaves out BSE-only stocks (``.BO``): illiquid BSE names often have no
+        bar on a normal day, so they must not decide whether a day is a trading session."""
+        extra = " AND symbol NOT LIKE '%.BO'" if nse_only else ""
         return {date.fromisoformat(r["date"]): r["n"] for r in self._all(
-            "SELECT date, COUNT(*) AS n FROM prices WHERE date>=? AND date<=? GROUP BY date", (_d(start), _d(end)))}
+            f"SELECT date, COUNT(*) AS n FROM prices WHERE date>=? AND date<=?{extra} GROUP BY date",
+            (_d(start), _d(end)))}
+
+    def closes_on(self, d: date) -> dict[str, float]:
+        return {r["symbol"]: r["close"] for r in self._all("SELECT symbol, close FROM prices WHERE date=?", (_d(d),))}
 
     def fetched_from(self) -> dict[str, date]:
         return {r["symbol"]: date.fromisoformat(r["fetched_from"]) for r in self._all("SELECT * FROM price_meta")}
@@ -387,15 +446,130 @@ class Repository:
     def is_processed(self, d: date) -> bool:
         return self._one("SELECT 1 AS x FROM processed_days WHERE date=?", (_d(d),)) is not None
 
-    def mark_processed(self, d: date, stats: dict[str, int]) -> None:
+    def mark_processed(self, d: date, stats: dict[str, int], coverage: float | None = None) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO processed_days(date, processed_at, screened, added, crossed, removed) VALUES (?,?,?,?,?,?)",
-            (_d(d), _now(), stats.get("screened", 0), stats.get("added", 0), stats.get("crossed", 0), stats.get("removed", 0)),
+            "INSERT OR REPLACE INTO processed_days(date, processed_at, screened, added, crossed, removed, coverage) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (_d(d), _now(), stats.get("screened", 0), stats.get("added", 0), stats.get("crossed", 0),
+             stats.get("removed", 0), coverage),
         )
+
+    def processed_days_table(self, limit: int = 30) -> list[dict]:
+        return self._all("SELECT * FROM processed_days ORDER BY date DESC LIMIT ?", (limit,))
+
+    # -- market breadth, extra signals ---------------------------------------------
+    def save_breadth(self, d: date, stocks: int, oversold: int, overbought: int, below50: int, above200: int,
+                     with200: int) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO market_breadth VALUES (?,?,?,?,?,?,?)",
+                          (_d(d), stocks, oversold, overbought, below50, above200, with200))
+
+    def breadth_history(self, limit: int = 120) -> list[dict]:
+        return self._all("SELECT * FROM market_breadth ORDER BY date DESC LIMIT ?", (limit,))
+
+    def save_signals(self, d: date, rows: Iterable[tuple[str, str, float | None]], keep_days: int = 45) -> None:
+        self.conn.execute("DELETE FROM signals WHERE trade_date=?", (_d(d),))
+        self.conn.executemany("INSERT OR REPLACE INTO signals(trade_date, symbol, kind, value) VALUES (?,?,?,?)",
+                              [(_d(d), s, k, v) for s, k, v in rows])
+        self.conn.execute("DELETE FROM signals WHERE trade_date < ?", (_d(d - timedelta(days=keep_days)),))
+
+    def signals_recent(self, days: int = 10) -> list[dict]:
+        last = self._one("SELECT MAX(trade_date) AS d FROM signals")
+        if not last or not last["d"]:
+            return []
+        cutoff = _d(date.fromisoformat(last["d"]) - timedelta(days=days))
+        return self._all(
+            """SELECT s.trade_date, s.symbol, s.kind, s.value, i.company, COALESCE(i.kind, 'EQUITY') AS type, i.sector
+               FROM signals s LEFT JOIN instruments i ON i.symbol = s.symbol
+               WHERE s.trade_date >= ? ORDER BY s.trade_date DESC, s.kind, s.symbol""", (cutoff,))
+
+    # -- sector / industry ---------------------------------------------------------
+    def symbols_needing_sector(self, symbols: Iterable[str], max_age_days: int, today: date) -> list[str]:
+        cutoff = _d(today - timedelta(days=max_age_days))
+        fresh = {r["symbol"] for r in self._all(
+            "SELECT symbol FROM instruments WHERE sector IS NOT NULL AND sector_updated >= ?", (cutoff,))}
+        return sorted(set(symbols) - fresh)
+
+    def set_sectors(self, values: dict[str, tuple[str, str]], today: date) -> None:
+        with self.transaction():
+            self.conn.executemany("UPDATE instruments SET sector=?, industry=?, sector_updated=? WHERE symbol=?",
+                                  [(sec, ind, _d(today), s) for s, (sec, ind) in values.items()])
+
+    # -- chart bars ---------------------------------------------------------------
+    def replace_chart_bars(self, symbol: str, bars: pd.DataFrame) -> None:
+        with self.transaction():
+            self.conn.execute("DELETE FROM chart_bars WHERE symbol=?", (symbol,))
+            self.conn.executemany(
+                "INSERT INTO chart_bars(symbol, date, close, sma50, rsi) VALUES (?,?,?,?,?)",
+                [(symbol, _d(r.date), None if pd.isna(r.close) else float(r.close),
+                  None if pd.isna(r.sma50) else float(r.sma50), None if pd.isna(r.rsi) else float(r.rsi))
+                 for r in bars.itertuples(index=False)])
+
+    def prune_chart_bars(self, keep: set[str]) -> None:
+        have = {r["symbol"] for r in self._all("SELECT DISTINCT symbol FROM chart_bars")}
+        with self.transaction():
+            self.conn.executemany("DELETE FROM chart_bars WHERE symbol=?", [(s,) for s in have - keep])
+
+    def chart_bars(self, symbol: str) -> pd.DataFrame:
+        rows = self._all("SELECT date, close, sma50, rsi FROM chart_bars WHERE symbol=? ORDER BY date", (symbol,))
+        return pd.DataFrame(rows, columns=["date", "close", "sma50", "rsi"])
+
+    # -- outcomes (backtest) -----------------------------------------------------------
+    def outcome_targets(self) -> list[dict]:
+        """Every signal we can measure: one ENTRY row per cycle, plus a CROSSOVER row for each crossover."""
+        rows = [{"symbol": r["symbol"], "rsi_date": r["rsi_date"], "base": "ENTRY", "base_date": r["rsi_date"]}
+                for r in self._all("SELECT symbol, rsi_date FROM active_tracking")]
+        for r in self._all("SELECT symbol, rsi_date, crossover_date FROM crossover_history"):
+            rows.append({"symbol": r["symbol"], "rsi_date": r["rsi_date"], "base": "ENTRY", "base_date": r["rsi_date"]})
+            if r["crossover_date"]:
+                rows.append({"symbol": r["symbol"], "rsi_date": r["rsi_date"], "base": "CROSSOVER",
+                             "base_date": r["crossover_date"]})
+        return rows
+
+    def existing_outcomes(self) -> dict[tuple[str, str, str], dict]:
+        return {(r["symbol"], r["rsi_date"], r["base"]): r for r in self._all("SELECT * FROM outcomes")}
+
+    def save_outcomes(self, rows: list[dict]) -> None:
+        with self.transaction():
+            self.conn.executemany(
+                """INSERT OR REPLACE INTO outcomes(symbol, rsi_date, base, base_date, ret_5, ret_10, ret_20,
+                       bench_5, bench_10, bench_20) VALUES (:symbol,:rsi_date,:base,:base_date,:ret_5,:ret_10,:ret_20,
+                       :bench_5,:bench_10,:bench_20)""", rows)
+
+    def outcomes_joined(self) -> list[dict]:
+        """Outcomes with the context needed to slice them (size, type, sector, days to cross, quality)."""
+        return self._all(
+            """SELECT o.*, COALESCE(i.kind,'EQUITY') AS type, i.sector,
+                      h.trading_days_taken, h.market_cap_on_crossover AS cap_hist,
+                      a.market_cap AS cap_active, a.quality AS quality_active
+               FROM outcomes o
+               LEFT JOIN instruments i ON i.symbol = o.symbol
+               LEFT JOIN crossover_history h ON h.symbol = o.symbol AND h.rsi_date = o.rsi_date
+               LEFT JOIN active_tracking a ON a.symbol = o.symbol AND a.rsi_date = o.rsi_date""")
+
+    # -- AI notes ----------------------------------------------------------------------
+    def save_ai_note(self, symbol: str, rsi_date: date, risk: str | None, summary: str) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO ai_notes VALUES (?,?,?,?,?)",
+                          (symbol, _d(rsi_date), risk, summary, _now()))
+
+    def ai_notes(self, limit: int = 200) -> list[dict]:
+        return self._all("SELECT * FROM ai_notes ORDER BY rsi_date DESC, symbol LIMIT ?", (limit,))
+
+    def has_ai_note(self, symbol: str, rsi_date: date) -> bool:
+        return self._one("SELECT 1 AS x FROM ai_notes WHERE symbol=? AND rsi_date=?", (symbol, _d(rsi_date))) is not None
+
+    # -- near-cross alerts ---------------------------------------------------------------
+    def near_cross_candidates(self, d: date, pct: float) -> list[dict]:
+        """Tracked stocks evaluated on ``d`` whose close is within ``pct`` % below SMA 50 and not yet alerted."""
+        return [r for r in self.active()
+                if r["last_eval_date"] == _d(d) and not r["near_alerted"] and r["sma50"] and r["cmp"]
+                and r["status"] == "ACTIVE" and 0 < (r["sma50"] - r["cmp"]) / r["sma50"] * 100 <= pct]
+
+    def mark_near_alerted(self, ids: Iterable[int]) -> None:
+        self.conn.executemany("UPDATE active_tracking SET near_alerted=1 WHERE id=?", [(i,) for i in ids])
 
     # -- active tracking ------------------------------------------------------
     def active(self) -> list[dict]:
-        return self._all("""SELECT a.*, COALESCE(i.kind, 'EQUITY') AS kind, i.aum_period FROM active_tracking a
+        return self._all("""SELECT a.*, COALESCE(i.kind, 'EQUITY') AS kind, i.aum_period, i.sector FROM active_tracking a
                               LEFT JOIN instruments i ON i.symbol = a.symbol
                               ORDER BY a.market_cap IS NULL, a.market_cap DESC, a.symbol""")
 
@@ -434,7 +608,7 @@ class Repository:
             self.conn.execute("DELETE FROM active_tracking WHERE id=?", (record["id"],))
 
     def history(self) -> list[dict]:
-        return self._all("""SELECT h.*, COALESCE(i.kind, 'EQUITY') AS kind, i.aum_period FROM crossover_history h
+        return self._all("""SELECT h.*, COALESCE(i.kind, 'EQUITY') AS kind, i.aum_period, i.sector FROM crossover_history h
                               LEFT JOIN instruments i ON i.symbol = h.symbol
                               ORDER BY h.exit_date DESC,
                                        h.market_cap_on_crossover IS NULL, h.market_cap_on_crossover DESC,

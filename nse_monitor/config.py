@@ -25,6 +25,12 @@ class StrategyConfig:
     min_avg_volume: float = 0.0          # optional liquidity filter on 20-day avg volume (0 = off)
     stale_after_missing_days: int = 5    # consecutive trading days with no bar -> status DATA_MISSING
     remove_after_missing_days: int = 60  # ... -> moved to history as DATA_UNAVAILABLE
+    delist_grace_days: int = 3           # sessions with no bar AND absent from the NSE list before closing as DELISTED
+    # --- optional rule variants (all off by default, so the core rules are unchanged) ---
+    entry_confirmation: str = "none"     # "none" | "rsi_turn" (also require RSI today > RSI yesterday)
+    max_tracking_days: int = 0           # close as TIME_LIMIT after this many sessions without a crossover (0 = off)
+    exit_rsi: float = 0.0                # close as RSI_RECOVERED once RSI rises above this value (0 = off)
+    stop_loss_pct: float = 0.0           # close as STOP_LOSS if the close falls this % below the RSI-day close (0 = off)
 
 
 @dataclass
@@ -45,6 +51,11 @@ class DataConfig:
     min_coverage: float = 0.9            # fraction of universe that must have a bar before a new day is processed
     shares_refresh_days: int = 7         # re-fetch shares outstanding (for market cap) after this many days
     reference_symbol: str = "^NSEI"      # index calendar; fallback only (sessions are derived from stock bars)
+    include_bse: bool = False            # also track stocks listed on BSE but not on NSE (symbols end in ".BO")
+    bse_groups: list[str] = field(default_factory=lambda: ["A", "B", "X", "XT"])  # BSE trading groups to include
+    sector_refresh_days: int = 30        # re-fetch sector/industry (tracked symbols only) after this many days
+    sector_batch_limit: int = 150        # at most this many sector look-ups per run (spreads the first fill)
+    price_mismatch_pct: float = 1.0      # flag Yahoo-vs-NSE official close differences above this many %
 
 
 @dataclass
@@ -65,6 +76,30 @@ class NotifyConfig:
 
 
 @dataclass
+class AlertConfig:
+    """Which events produce alerts. Crossover alerts are always on (subject to the size/type filters)."""
+    on_entry: bool = True                # one digest alert listing new RSI<30 entries
+    entry_min_quality: float = 0.0       # only list entries with a quality score at least this high
+    entry_max_listed: int = 25           # entries listed in the digest (best quality first)
+    on_near_cross: bool = True           # alert when a tracked stock gets close below SMA 50
+    near_cross_pct: float = 2.0          # "close" = within this % below SMA 50
+    near_cross_max: int = 10             # at most this many near-cross alerts per run
+    min_market_cap_cr: float = 0.0       # skip alerts for names smaller than this (Rs crore; 0 = no filter)
+    kinds: list[str] = field(default_factory=lambda: ["EQUITY", "ETF"])  # which instrument types alert
+
+
+@dataclass
+class AiConfig:
+    """Optional Claude-written notes on new entries (needs ANTHROPIC_API_KEY). Off unless enabled."""
+    enabled: bool = False
+    model: str = "claude-opus-5-5"
+    effort: str = "low"                  # low | medium | high : how hard the model thinks per note
+    max_notes_per_run: int = 10          # best-quality entries get a note each run
+    use_news: bool = True                # include recent Yahoo headlines as context
+    max_tokens: int = 2000
+
+
+@dataclass
 class AppConfig:
     db_path: str = "data/nse_monitor.db"
     reports_dir: str = "reports"
@@ -72,6 +107,8 @@ class AppConfig:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     data: DataConfig = field(default_factory=DataConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    alerts: AlertConfig = field(default_factory=AlertConfig)
+    ai: AiConfig = field(default_factory=AiConfig)
 
     base_dir: Path = field(default_factory=Path.cwd)
 

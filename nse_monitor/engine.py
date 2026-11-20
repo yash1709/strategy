@@ -10,17 +10,22 @@ last processed one is replayed in date order, each seeing only its own data.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 
 import pandas as pd
 
+from . import ai, analytics
 from .config import AppConfig
-from .data.base import MarketDataSource
-from .notifications import (Notifier, crossover_message, dispatch_pending, summary_message)
+from .data.base import MarketDataSource, is_bse
+from .notifications import (Notifier, crossover_message, dispatch_pending, entry_digest_message, mood_line,
+                            near_cross_message, summary_message)
 from .reports import export_reports
 from .storage import Repository
 from .strategy import Event, IndicatorBook, Strategy
+
+CRORE = 1e7
 
 log = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -87,7 +92,9 @@ class Engine:
 
         book = IndicatorBook(self.repo.load_all_prices(), self.cfg.strategy)
         self._audit_adjustments(book)
-        listed = list(universe)
+        # Coverage is judged on the NSE stocks only: many small BSE names legitimately have no bar on a normal
+        # day, and they must not hold up (or defer) a trading day. Their gaps are handled like any missing data.
+        listed = [s for s in universe if not is_bse(s)] or list(universe)
         min_cov = self.cfg.data.min_coverage
         for n, d in enumerate(days):
             cov = book.coverage(d, listed)
@@ -107,18 +114,134 @@ class Engine:
             with self.repo.transaction():
                 day = self.strategy.process_day(d, book, self.repo, universe)
                 for ev in day.events:
-                    if ev.kind == "CROSSED":
+                    if ev.kind == "CROSSED" and self._alert_allowed(ev.symbol, kind=ev.data.get("kind"),
+                                                                    size=ev.data.get("market_cap")):
                         subject, body = crossover_message(ev)
                         self.repo.queue_alert("CROSSOVER", subject, body, self._channels(), d, ev.symbol)
-                self.repo.mark_processed(d, day.stats)
+                self.repo.mark_processed(d, day.stats, coverage=round(cov, 4))
             log.info("%s processed: %s", d, day.stats)
             res.processed_days.append(d)
             res.events.extend(day.events)
 
-        if res.processed_days and self.cfg.notify.daily_summary:
-            subject, body = summary_message(res.processed_days, res.events, len(self.repo.active()))
-            self.repo.queue_alert("SUMMARY", subject, body, self._channels(), res.processed_days[-1])
+        if res.processed_days:
+            self._post_process(res, book)
+            if self.cfg.notify.daily_summary:
+                mood = mood_line(next(iter(self.repo.breadth_history(1)), None))
+                subject, body = summary_message(res.processed_days, res.events, len(self.repo.active()), mood)
+                self.repo.queue_alert("SUMMARY", subject, body, self._channels(), res.processed_days[-1])
         return self._finish(res, notify)
+
+    # ------------------------------------------------------- after-the-day work
+    def _post_process(self, res: RunResult, book: IndicatorBook) -> None:
+        """Everything that happens after the trading days are committed. None of it can change the
+        strategy's decisions, so a failure here is logged and never fails the run."""
+        last = res.processed_days[-1]
+        for name, step in (("analytics", lambda: self._refresh_analytics(book, last)),
+                           ("sectors", lambda: self._refresh_sectors(date.today())),
+                           ("alerts", lambda: self._queue_signal_alerts(res, last))):
+            try:
+                step()
+            except Exception as exc:
+                log.error("Post-processing step '%s' failed: %s", name, exc)
+                self.repo.audit("POST_STEP_FAILED", trade_date=last, step=name, error=str(exc)[:300])
+
+    def _refresh_analytics(self, book: IndicatorBook, today: date) -> None:
+        n = analytics.update_outcomes(self.repo, book)
+        m = analytics.refresh_chart_bars(self.repo, book, today)
+        log.info("Analytics: %d outcome rows updated, chart data for %d symbols", n, m)
+
+    def rebuild_analytics(self) -> None:
+        """Recompute outcomes / chart data from the price cache (CLI ``analytics``; also after upgrades)."""
+        book = IndicatorBook(self.repo.load_all_prices(), self.cfg.strategy)
+        self._refresh_analytics(book, self.repo.last_processed_day() or date.today())
+        self._refresh_sectors(date.today())
+
+    def _refresh_sectors(self, today: date) -> None:
+        """Sector / industry for tracked and historical symbols (ETFs use their NSE category)."""
+        dcfg = self.cfg.data
+        symbols = self.repo.active_symbols() | self.repo.history_symbols()
+        need = self.repo.symbols_needing_sector(symbols, dcfg.sector_refresh_days, today)
+        etf, equity = {}, []
+        for s in need:
+            inst = self.repo.instrument(s) or {}
+            if inst.get("kind") == "ETF":
+                m = re.search(r"\[(.+)\]\s*$", inst.get("company") or "")
+                etf[s] = (m.group(1) if m else "ETF", "ETF")
+            else:
+                equity.append(s)
+        if etf:
+            self.repo.set_sectors(etf, today)
+        batch = equity[:dcfg.sector_batch_limit]
+        if batch:
+            try:
+                self.repo.set_sectors(self.source.fetch_sectors(batch), today)
+            except Exception as exc:
+                log.error("Sector fetch failed: %s", exc)
+                self.repo.audit("SECTOR_FETCH_FAILED", trade_date=today, error=str(exc)[:300])
+
+    # ---------------------------------------------------------------- alerts
+    def _alert_allowed(self, symbol: str, close: float | None = None, kind: str | None = None,
+                       size: float | None = None) -> bool:
+        """The user's alert filters (instrument types, minimum size). Unknown size passes the size filter."""
+        a = self.cfg.alerts
+        if kind is None:
+            inst = self.repo.instrument(symbol)
+            kind = (inst or {}).get("kind") or "EQUITY"
+        if kind not in a.kinds:
+            return False
+        if a.min_market_cap_cr:
+            if size is None and close:
+                size = self.repo.market_size(symbol, close)
+            if size is not None and size / CRORE < a.min_market_cap_cr:
+                return False
+        return True
+
+    def _queue_signal_alerts(self, res: RunResult, last: date) -> None:
+        a = self.cfg.alerts
+        channels = self._channels()
+        mood = mood_line(next(iter(self.repo.breadth_history(1)), None))
+
+        entered = [e for e in res.events if e.kind == "ENTERED"
+                   and self._alert_allowed(e.symbol, close=e.data.get("close"))
+                   and (e.data.get("quality") or 0) >= a.entry_min_quality]
+        entered.sort(key=lambda e: (-(e.data.get("quality") or 0), e.symbol))
+        notes = self._ai_notes(entered[:self.cfg.ai.max_notes_per_run], mood)
+        if a.on_entry and entered:
+            subject, body = entry_digest_message(last, entered, notes, mood, len(entered), a.entry_max_listed)
+            self.repo.queue_alert("ENTRY", subject, body, channels, last)
+
+        if a.on_near_cross:
+            near = [r for r in self.repo.near_cross_candidates(last, a.near_cross_pct)
+                    if self._alert_allowed(r["symbol"], kind=r["kind"], size=r["market_cap"])]
+            for rec in near[:a.near_cross_max]:  # active() is already largest size first
+                subject, body = near_cross_message(rec)
+                self.repo.queue_alert("NEAR_CROSS", subject, body, channels, last, rec["symbol"])
+            self.repo.mark_near_alerted(r["id"] for r in near[:a.near_cross_max])
+
+    def _ai_notes(self, entries: list[Event], mood: str | None) -> dict[str, dict]:
+        """Claude notes for the best entries of this run (optional; empty when AI is off or unavailable)."""
+        if not entries or not ai.available(self.cfg.ai):
+            return {}
+        notes: dict[str, dict] = {}
+        for e in entries:
+            if self.repo.has_ai_note(e.symbol, e.trade_date):
+                continue
+            headlines: list[str] = []
+            if self.cfg.ai.use_news:
+                try:
+                    headlines = self.source.fetch_news(e.symbol)
+                except Exception as exc:
+                    log.debug("No news for %s: %s", e.symbol, exc)
+            facts = {"RSI(14)": e.data["rsi_value"], "Close": e.data.get("close"),
+                     "Quality score": f"{e.data.get('quality')}/100 ({e.data.get('quality_notes')})",
+                     "Date": e.trade_date.isoformat()}
+            if mood:
+                facts["Market mood"] = mood
+            note = ai.entry_note(self.cfg.ai, e.symbol, e.company, facts, headlines)
+            if note:
+                self.repo.save_ai_note(e.symbol, e.trade_date, note["risk"], note["summary"])
+                notes[e.symbol] = note
+        return notes
 
     def _finish(self, res: RunResult, notify: bool) -> RunResult:
         self._refresh_market_caps(date.today())
@@ -222,21 +345,25 @@ class Engine:
         self.repo.refresh_market_caps()
 
     def _fill_recent_days(self, symbols: list[str], first_needed: date, as_of: date) -> None:
-        """Yahoo can take 12+ hours to complete a session. For recent unprocessed weekdays that
-        are still below the coverage threshold, fill the missing bars from the exchange's
-        official end-of-day file. Existing bars are never overwritten."""
+        """Yahoo can take 12+ hours to complete a session, and even on a "complete" day it can miss a
+        few percent of stocks. For every recent, not-yet-processed weekday, fill each symbol that has
+        no bar from the exchange's official end-of-day file (existing bars are never overwritten),
+        and compare the bars both sources have so a disagreement is visible in the data-health panel.
+
+        A processed day is never revisited, so gaps must be closed *before* the day is processed."""
         start = max(first_needed, as_of - timedelta(days=self.cfg.data.official_fill_days))
         counts = self.repo.bar_counts_by_date(start, as_of)
-        wanted, need = set(symbols), self.cfg.data.min_coverage * len(symbols)
+        wanted = set(symbols)
         d = start
         while d <= as_of:
-            if d.weekday() < 5 and counts.get(d, 0) < need and not self.repo.is_processed(d):
+            if d.weekday() < 5 and counts.get(d, 0) < len(symbols) and not self.repo.is_processed(d):
                 try:
                     bars = self.source.fetch_official_day(d)
                 except Exception as exc:
                     log.warning("Official end-of-day file for %s unavailable: %s", d, exc)
                     bars = None
                 if bars is not None and len(bars):
+                    self._cross_check_official(d, bars, wanted)
                     added = self.repo.fill_missing_bars(d, bars, wanted)
                     if added:
                         log.info("%s: filled %d missing bars from the official end-of-day file "
@@ -244,6 +371,26 @@ class Engine:
                         self.repo.audit("OFFICIAL_EOD_FILL", trade_date=d, bars_added=added,
                                         had_before=counts.get(d, 0))
             d += timedelta(days=1)
+
+    def _cross_check_official(self, d: date, official: pd.DataFrame, wanted: set[str], max_rows: int = 25) -> int:
+        """Flag symbols whose Yahoo close differs from NSE's official close by more than the tolerance.
+        Nothing is overwritten (the official file is unadjusted, Yahoo's is split-adjusted); the
+        differences are recorded in the audit log and shown on the dashboard. Returns how many differ."""
+        tol = self.cfg.data.price_mismatch_pct / 100
+        mine = self.repo.closes_on(d)
+        bad = []
+        for symbol, close in mine.items():
+            if symbol in wanted and symbol in official.index:
+                ref = float(official.loc[symbol, "close"])
+                if ref > 0 and abs(close / ref - 1) > tol:
+                    bad.append((abs(close / ref - 1), symbol, close, ref))
+        for diff, symbol, close, ref in sorted(bad, reverse=True)[:max_rows]:
+            self.repo.audit_once("PRICE_SOURCE_MISMATCH", symbol, d, yahoo=round(close, 4), official=round(ref, 4),
+                                 diff_pct=round(100 * diff, 2))
+        if bad:
+            log.warning("%s: %d symbols differ from the official close by more than %.1f%%", d, len(bad),
+                        100 * tol)
+        return len(bad)
 
     def _corporate_action(self, symbol: str, bars: pd.DataFrame) -> bool:
         cached = self.repo.get_prices(symbol, bars.index.min(), bars.index.max())
@@ -288,6 +435,7 @@ class Engine:
 
     def _derive_calendar(self, start: date, end: date, symbols: list[str]) -> list[date]:
         """A date is a session if at least half the symbols have a bar on it."""
-        counts = self.repo.bar_counts_by_date(start, end)
-        threshold = max(1, int(0.5 * len(symbols)))
+        core = [s for s in symbols if not is_bse(s)] or list(symbols)  # BSE-only names never decide this
+        counts = self.repo.bar_counts_by_date(start, end, nse_only=len(core) < len(symbols))
+        threshold = max(1, int(0.5 * len(core)))
         return sorted(d for d, n in counts.items() if n >= threshold)

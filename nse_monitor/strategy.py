@@ -19,7 +19,16 @@ Rules implemented here
   inclusive -- a crossover on the first tracked day counts as 1.
 * Missing bars (suspension, data gap): the day still counts as a trading day,
   the stock is not evaluated, ``missing_days`` increments. Long gaps are flagged
-  and eventually closed out; delisted stocks are closed as DELISTED.
+  and eventually closed out; delisted stocks are closed as DELISTED after a short
+  grace period (so a one-day glitch in the NSE list cannot close a position).
+
+Optional extras (all off, or informational only, by default)
+------------------------------------------------------------
+* ``entry_confirmation = "rsi_turn"``: only enter once RSI has turned up.
+* ``max_tracking_days`` / ``exit_rsi`` / ``stop_loss_pct``: extra ways to close a cycle.
+* Every entry gets a 0-100 quality score and a note (see ``quality_score``).
+* Each day the market breadth and a few extra signals (overbought, 52-week
+  high/low, golden/death cross) are recorded.
 """
 from __future__ import annotations
 
@@ -33,6 +42,7 @@ import pandas as pd
 
 from .cleaning import adjust_discontinuities
 from .config import StrategyConfig
+from .data.base import is_bse
 from .indicators import rsi_wilder, sma
 from .storage import Repository
 
@@ -46,6 +56,18 @@ INSUFFICIENT_DATA = "INSUFFICIENT_DATA"  # fewer than sma_period bars so far
 SMA50_CROSSED = "SMA50_CROSSED"
 DELISTED = "DELISTED"
 DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
+TIME_LIMIT = "TIME_LIMIT"                # optional rules
+RSI_RECOVERED = "RSI_RECOVERED"
+STOP_LOSS = "STOP_LOSS"
+
+# one trading year, and the long average used for the trend / golden-cross signals
+YEAR_BARS = 252
+LONG_SMA = 200
+
+# IndicatorBook matrix columns
+(C_CLOSE, C_VOL, C_RSI, C_SMA, C_AVGVOL, C_ADJ, C_SMA_ADJ, C_SMA200_ADJ,
+ C_SMA200, C_LOW252, C_HIGH252) = range(11)
+NAN = float("nan")
 
 
 class Bar(NamedTuple):
@@ -55,6 +77,16 @@ class Bar(NamedTuple):
     sma: float
     avg_volume: float
     bars: int  # number of bars available up to and including this day
+    # extras (all expressed in the price scale of this bar's own day unless noted)
+    sma200: float = NAN
+    low252: float = NAN
+    high252: float = NAN
+    prev_rsi: float = NAN
+    prev_close: float = NAN
+    prev_sma_adj: float = NAN     # adjusted-scale values, comparable with sma_adj / sma200_adj
+    prev_sma200_adj: float = NAN
+    sma_adj: float = NAN
+    sma200_adj: float = NAN
 
 
 class IndicatorBook:
@@ -67,6 +99,7 @@ class IndicatorBook:
 
     def __init__(self, prices: dict[str, pd.DataFrame], cfg: StrategyConfig):
         self._data: dict[str, tuple[dict[date, int], np.ndarray]] = {}
+        self._dates: dict[str, list[date]] = {}
         self.adjustments: dict[str, list[dict]] = {}  # unadjusted splits / gaps repaired, per symbol
         for symbol, df in prices.items():
             if df.empty:
@@ -80,14 +113,23 @@ class IndicatorBook:
             if events:
                 self.adjustments[symbol] = events
             adj = pd.Series(adjusted, index=close.index)
+            sma_adj = sma(adj, cfg.sma_period)
+            sma200_adj = sma(adj, LONG_SMA)
             matrix = np.column_stack([
                 close.to_numpy(),
                 volume.to_numpy(),
                 rsi_wilder(adj, cfg.rsi_period).to_numpy(),
-                sma(adj, cfg.sma_period).to_numpy() / scale,
+                sma_adj.to_numpy() / scale,
                 volume.rolling(20, min_periods=20).mean().to_numpy(),
+                adjusted,
+                sma_adj.to_numpy(),
+                sma200_adj.to_numpy(),
+                sma200_adj.to_numpy() / scale,
+                adj.rolling(YEAR_BARS, min_periods=YEAR_BARS).min().to_numpy() / scale,
+                adj.rolling(YEAR_BARS, min_periods=YEAR_BARS).max().to_numpy() / scale,
             ])
             self._data[symbol] = ({d: i for i, d in enumerate(df.index)}, matrix)
+            self._dates[symbol] = list(df.index)
 
     def bar(self, symbol: str, d: date) -> Bar | None:
         entry = self._data.get(symbol)
@@ -96,8 +138,16 @@ class IndicatorBook:
         pos = entry[0].get(d)
         if pos is None:
             return None
-        c, v, r, s, av = entry[1][pos]
-        return Bar(c, v, r, s, av, pos + 1)
+        m = entry[1]
+        row = m[pos]
+        prev = m[pos - 1] if pos > 0 else None
+        return Bar(row[C_CLOSE], row[C_VOL], row[C_RSI], row[C_SMA], row[C_AVGVOL], pos + 1,
+                   row[C_SMA200], row[C_LOW252], row[C_HIGH252],
+                   prev[C_RSI] if prev is not None else NAN,
+                   prev[C_CLOSE] if prev is not None else NAN,
+                   prev[C_SMA_ADJ] if prev is not None else NAN,
+                   prev[C_SMA200_ADJ] if prev is not None else NAN,
+                   row[C_SMA_ADJ], row[C_SMA200_ADJ])
 
     def last_date(self, symbol: str) -> date | None:
         entry = self._data.get(symbol)
@@ -107,6 +157,30 @@ class IndicatorBook:
         if not symbols:
             return 0.0
         return sum(1 for s in symbols if s in self._data and d in self._data[s][0]) / len(symbols)
+
+    # -- helpers for charts and the backtest ------------------------------------
+    def symbols(self) -> list[str]:
+        return list(self._data)
+
+    def series(self, symbol: str, last: int = 150) -> pd.DataFrame:
+        """Last ``last`` bars as (date, close, sma50, rsi), in the CURRENT price scale
+        (splits removed) so a chart has no artificial jumps."""
+        entry = self._data.get(symbol)
+        if entry is None:
+            return pd.DataFrame(columns=["date", "close", "sma50", "rsi"])
+        m, dates = entry[1][-last:], self._dates[symbol][-last:]
+        return pd.DataFrame({"date": dates, "close": m[:, C_ADJ], "sma50": m[:, C_SMA_ADJ], "rsi": m[:, C_RSI]})
+
+    def forward_return(self, symbol: str, d: date, n: int) -> float | None:
+        """Return from the close on ``d`` to the close ``n`` bars later (split-adjusted); None if unknown."""
+        entry = self._data.get(symbol)
+        if entry is None:
+            return None
+        pos = entry[0].get(d)
+        if pos is None or pos + n >= len(entry[1]):
+            return None
+        a, b = entry[1][pos, C_ADJ], entry[1][pos + n, C_ADJ]
+        return None if not (a > 0 and b > 0) else float(b / a - 1)
 
 
 @dataclass
@@ -129,6 +203,46 @@ def _num(x: float) -> float | None:
     return None if x is None or (isinstance(x, float) and math.isnan(x)) else round(float(x), 4)
 
 
+def _ok(x: float) -> bool:
+    return x is not None and not math.isnan(x)
+
+
+def quality_score(bar: Bar, market_oversold_pct: float = 0.0) -> tuple[int, str]:
+    """A transparent 0-100 heuristic for a fresh RSI<30 entry (not a prediction).
+
+    Four parts of up to 25 points each:
+    * depth   -- how far below 30 the RSI is (15 or lower = full marks)
+    * volume  -- today's volume vs its 20-day average (2x or more = full marks)
+    * trend   -- close vs SMA 200: at or above = full marks, 30% below = zero
+                 (a pull-back in an uptrend scores higher than a broken stock)
+    * turn    -- RSI higher than the day before (selling pressure easing)
+    The note also says whether the whole market is oversold (>= 15% of stocks below RSI 30).
+    """
+    depth = max(0.0, min(1.0, (30.0 - bar.rsi) / 15.0)) * 25
+    notes = [f"RSI {bar.rsi:.0f}"]
+    if _ok(bar.avg_volume) and bar.avg_volume > 0 and _ok(bar.volume):
+        ratio = bar.volume / bar.avg_volume
+        vol = max(0.0, min(1.0, (ratio - 0.8) / 1.2)) * 25
+        notes.append(f"volume {ratio:.1f}x avg")
+    else:
+        vol = 0.0
+        notes.append("volume n/a")
+    if _ok(bar.sma200) and bar.sma200 > 0:
+        dist = bar.close / bar.sma200 - 1
+        trend = 25.0 if dist >= 0 else max(0.0, 1 + dist / 0.30) * 25
+        notes.append(f"{dist * 100:+.0f}% vs SMA200")
+    else:
+        trend = 12.0
+        notes.append("SMA200 n/a")
+    if _ok(bar.prev_rsi) and bar.rsi > bar.prev_rsi:
+        turn = 25.0
+        notes.append("RSI turning up")
+    else:
+        turn = 0.0
+    notes.append("market-wide selloff" if market_oversold_pct >= 15 else "stock-specific")
+    return int(round(depth + vol + trend + turn)), "; ".join(notes)
+
+
 class Strategy:
     def __init__(self, cfg: StrategyConfig):
         self.cfg = cfg
@@ -136,9 +250,48 @@ class Strategy:
     def process_day(self, d: date, book: IndicatorBook, repo: Repository, universe: dict[str, str]) -> DayResult:
         """Apply one trading day. Caller wraps this in a DB transaction."""
         result = DayResult(d)
+        breadth = self._breadth_and_signals(d, book, repo, universe)
         exited_today = self._monitor(d, book, repo, universe, result)
-        self._screen(d, book, repo, universe, exited_today, result)
+        self._screen(d, book, repo, universe, exited_today, result, breadth)
         return result
+
+    # -- step 0: market breadth + extra signals ------------------------------
+    def _breadth_and_signals(self, d: date, book: IndicatorBook, repo: Repository,
+                             universe: dict[str, str]) -> float:
+        """Record how oversold the whole market is and any extra signals. Returns % of stocks with RSI < threshold."""
+        n = oversold = overbought = below50 = above200 = with200 = 0
+        rows: list[tuple[str, str, float | None]] = []
+        for symbol in universe:
+            bar = book.bar(symbol, d)
+            if bar is None or math.isnan(bar.rsi):
+                continue
+            core = not is_bse(symbol)  # market mood is measured on NSE stocks; BSE-only names still get signals
+            if core:
+                n += 1
+                if bar.rsi < self.cfg.rsi_threshold:
+                    oversold += 1
+                if bar.rsi > 70:
+                    overbought += 1
+                if _ok(bar.sma) and bar.close < bar.sma:
+                    below50 += 1
+                if _ok(bar.sma200):
+                    with200 += 1
+                    if bar.close > bar.sma200:
+                        above200 += 1
+            if bar.rsi > 70 and _ok(bar.prev_rsi) and bar.prev_rsi <= 70:
+                rows.append((symbol, "OVERBOUGHT", _num(bar.rsi)))
+            if _ok(bar.low252) and bar.close <= bar.low252:
+                rows.append((symbol, "LOW_52W", _num(bar.close)))
+            if _ok(bar.high252) and bar.close >= bar.high252:
+                rows.append((symbol, "HIGH_52W", _num(bar.close)))
+            if _ok(bar.sma_adj) and _ok(bar.sma200_adj) and _ok(bar.prev_sma_adj) and _ok(bar.prev_sma200_adj):
+                if bar.prev_sma_adj <= bar.prev_sma200_adj and bar.sma_adj > bar.sma200_adj:
+                    rows.append((symbol, "GOLDEN_CROSS", _num(bar.close)))
+                elif bar.prev_sma_adj >= bar.prev_sma200_adj and bar.sma_adj < bar.sma200_adj:
+                    rows.append((symbol, "DEATH_CROSS", _num(bar.close)))
+        repo.save_breadth(d, n, oversold, overbought, below50, above200, with200)
+        repo.save_signals(d, rows)
+        return 100.0 * oversold / n if n else 0.0
 
     # -- step 1: SMA 50 monitoring of the active list ------------------------
     def _monitor(self, d: date, book: IndicatorBook, repo: Repository, universe: dict[str, str],
@@ -184,10 +337,32 @@ class Strategy:
                 }))
                 result.stats["crossed"] += 1
                 exited.add(symbol)
+                continue
+
+            reason = self._early_exit(rec, bar, days)
+            if reason:
+                status, note = reason
+                repo.close_tracking(rec, status, exit_date=d, cmp=cmp_, sma50=sma50, days_taken=days,
+                                    notes=note, volume=volume)
+                repo.audit(status, symbol, d, cmp=cmp_, sma50=sma50, days=days)
+                result.events.append(Event("CLOSED", symbol, rec["company"], d, {"status": status, "notes": note}))
+                result.stats["removed"] += 1
+                exited.add(symbol)
             else:
                 repo.update_active(rec["id"], cmp=cmp_, sma50=sma50, volume=volume, days_tracked=days,
                                    last_eval_date=d, missing_days=0, status=ACTIVE)
         return exited
+
+    def _early_exit(self, rec: dict, bar: Bar, days: int) -> tuple[str, str] | None:
+        """Optional extra exit rules (off by default). The SMA 50 crossover is always checked first."""
+        cfg = self.cfg
+        if cfg.stop_loss_pct and rec.get("rsi_close") and bar.close < rec["rsi_close"] * (1 - cfg.stop_loss_pct / 100):
+            return STOP_LOSS, f"Close fell more than {cfg.stop_loss_pct:g}% below the RSI-day close"
+        if cfg.exit_rsi and _ok(bar.rsi) and bar.rsi > cfg.exit_rsi:
+            return RSI_RECOVERED, f"RSI rose above {cfg.exit_rsi:g} before the close crossed SMA 50"
+        if cfg.max_tracking_days and days >= cfg.max_tracking_days:
+            return TIME_LIMIT, f"No SMA 50 crossover within {cfg.max_tracking_days} trading days"
+        return None
 
     def _handle_missing(self, d: date, rec: dict, days: int, book: IndicatorBook, repo: Repository,
                         universe: dict[str, str], result: DayResult, exited: set[str]) -> None:
@@ -195,8 +370,10 @@ class Strategy:
         missing = rec["missing_days"] + 1
         last_bar = book.last_date(symbol)
         gone = symbol not in universe and (last_bar is None or last_bar < d)
+        # a stock missing from the NSE list for only a session or two is more likely a list glitch than a delisting
+        delisted = gone and missing >= self.cfg.delist_grace_days
 
-        if gone or missing >= self.cfg.remove_after_missing_days:
+        if delisted or missing >= self.cfg.remove_after_missing_days:
             status = DELISTED if gone else DATA_UNAVAILABLE
             note = (f"No longer in NSE list; last bar {last_bar}" if gone
                     else f"No price data for {missing} consecutive trading days")
@@ -217,7 +394,7 @@ class Strategy:
 
     # -- step 2: RSI < 30 screening ------------------------------------------
     def _screen(self, d: date, book: IndicatorBook, repo: Repository, universe: dict[str, str],
-                exited_today: set[str], result: DayResult) -> None:
+                exited_today: set[str], result: DayResult, market_oversold_pct: float = 0.0) -> None:
         cfg = self.cfg
         active = repo.active_symbols()
         for symbol, company in universe.items():
@@ -233,11 +410,16 @@ class Strategy:
                 continue
             if cfg.min_avg_volume and not (bar.avg_volume >= cfg.min_avg_volume):
                 continue
+            if cfg.entry_confirmation == "rsi_turn" and not (_ok(bar.prev_rsi) and bar.rsi > bar.prev_rsi):
+                continue  # still falling: wait for the first uptick while RSI is below the threshold
             rsi_value = round(float(bar.rsi), 2)
+            quality, notes = quality_score(bar, market_oversold_pct)
             tid = repo.add_active(symbol, company, d, rsi_value, _num(bar.close), PENDING_START)
-            repo.update_active(tid, cmp=_num(bar.close), volume=_num(bar.volume), last_eval_date=d)
+            repo.update_active(tid, cmp=_num(bar.close), volume=_num(bar.volume), last_eval_date=d,
+                               quality=quality, quality_notes=notes)
             repo.add_observation(tid, symbol, d, _num(bar.close), _num(bar.sma), rsi_value)
-            repo.audit("ENTERED", symbol, d, rsi=rsi_value, close=_num(bar.close))
-            result.events.append(Event("ENTERED", symbol, company, d, {"rsi_value": rsi_value,
-                                                                       "close": _num(bar.close)}))
+            repo.audit("ENTERED", symbol, d, rsi=rsi_value, close=_num(bar.close), quality=quality)
+            result.events.append(Event("ENTERED", symbol, company, d, {
+                "rsi_value": rsi_value, "close": _num(bar.close), "quality": quality, "quality_notes": notes,
+                "volume": _num(bar.volume), "tracking_id": tid}))
             result.stats["added"] += 1

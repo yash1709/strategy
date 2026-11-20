@@ -61,22 +61,66 @@ def crossover_message(ev: Event) -> tuple[str, str]:
     return subject, body
 
 
-def summary_message(days: list[date], events: list[Event], active_count: int) -> tuple[str, str]:
+def summary_message(days: list[date], events: list[Event], active_count: int,
+                    mood: str | None = None) -> tuple[str, str]:
     entered = [e for e in events if e.kind == "ENTERED"]
     crossed = [e for e in events if e.kind == "CROSSED"]
     closed = [e for e in events if e.kind == "CLOSED"]
     span = fmt_date(days[0]) if len(days) == 1 else f"{fmt_date(days[0])} to {fmt_date(days[-1])}"
     lines = [f"NSE RSI/SMA50 monitor - {span}",
              f"New RSI<30 entries: {len(entered)} | SMA50 crossovers: {len(crossed)} | "
-             f"Closed (data/delisted): {len(closed)} | Active now: {active_count}"]
+             f"Closed (data/delisted/other): {len(closed)} | Active now: {active_count}"]
+    if mood:
+        lines.append(mood)
     if entered:
-        lines.append("Entered: " + ", ".join(f"{e.symbol} ({e.data['rsi_value']:.1f})" for e in entered[:60])
+        best = sorted(entered, key=lambda e: -(e.data.get("quality") or 0))
+        lines.append("Entered (best quality first): " + ", ".join(
+            f"{e.symbol} ({e.data['rsi_value']:.1f}, Q{e.data.get('quality', '-')})" for e in best[:60])
                      + (" ..." if len(entered) > 60 else ""))
     if crossed:
         lines.append("Crossed: " + ", ".join(f"{e.symbol} ({e.data['trading_days_taken']}d)" for e in crossed))
     if closed:
         lines.append("Closed: " + ", ".join(f"{e.symbol} [{e.data['status']}]" for e in closed))
     return f"NSE monitor summary {fmt_date(days[-1])}", "\n".join(lines)
+
+
+def mood_line(breadth: dict | None) -> str | None:
+    """'Market mood: 312 of 2,291 stocks (13.6%) are below RSI 30' from a market_breadth row."""
+    if not breadth or not breadth.get("stocks"):
+        return None
+    pct = 100 * breadth["oversold"] / breadth["stocks"]
+    tone = "market-wide selloff" if pct >= 15 else "normal"
+    return (f"Market mood: {breadth['oversold']:,} of {breadth['stocks']:,} stocks ({pct:.1f}%) are below RSI 30 "
+            f"[{tone}]; {breadth['overbought']:,} above RSI 70.")
+
+
+def entry_digest_message(day: date, entries: list[Event], notes: dict[str, dict], mood: str | None,
+                         total: int, max_listed: int) -> tuple[str, str]:
+    """One alert listing new RSI<30 entries, best quality first, with Claude's note where there is one."""
+    lines = [f"{total} new RSI<30 entr{'y' if total == 1 else 'ies'} on {fmt_date(day)}"
+             + (f" (showing the best {len(entries)})" if len(entries) < total else "")]
+    if mood:
+        lines.append(mood)
+    for e in entries[:max_listed]:
+        d = e.data
+        lines.append(f"\n{e.symbol}" + (f" ({e.company})" if e.company else "")
+                     + f": RSI {d['rsi_value']:.1f}, close {fmt_inr(d.get('close'))}, quality {d.get('quality', '-')}/100")
+        if d.get("quality_notes"):
+            lines.append(f"  {d['quality_notes']}")
+        note = notes.get(e.symbol)
+        if note:
+            lines.append(f"  News risk {note['risk']}: {note['summary']}")
+    return f"NSE oversold entries {fmt_date(day)}", "\n".join(lines)
+
+
+def near_cross_message(rec: dict) -> tuple[str, str]:
+    gap = (rec["sma50"] - rec["cmp"]) / rec["sma50"] * 100
+    return (f"Near SMA 50: {rec['symbol']}", "\n".join([
+        f"Stock: {rec['symbol']}" + (f" ({rec['company']})" if rec.get("company") else ""),
+        f"CMP: {fmt_inr(rec['cmp'])}  |  SMA 50: {fmt_inr(rec['sma50'])}  ({gap:.1f}% below)",
+        f"RSI Entry Date: {fmt_date(rec['rsi_date'])}  |  Days tracked: {rec['days_tracked']}",
+        f"{'AUM' if rec.get('kind') == 'ETF' else 'Market Cap'}: {fmt_crore(rec.get('market_cap'))}",
+    ]))
 
 
 # -- channels ---------------------------------------------------------------
@@ -170,7 +214,19 @@ def dispatch_pending(repo: Repository, notifiers: list[Notifier], max_attempts: 
             repo.mark_alert(alert["id"], True)
             sent += 1
         except Exception as exc:
-            log.error("Alert %s via %s failed: %s", alert["id"], alert["channel"], exc)
-            repo.mark_alert(alert["id"], False, str(exc)[:500])
+            reason = safe_error(exc)
+            log.error("Alert %s via %s failed: %s", alert["id"], alert["channel"], reason)
+            repo.mark_alert(alert["id"], False, reason)
             failed += 1
     return sent, failed
+
+
+def safe_error(exc: BaseException) -> str:
+    """A description of a delivery failure that is safe to log and store.
+
+    ``requests`` puts the full URL in its error text, and for Telegram and webhooks the URL *is* the secret
+    (``.../bot<TOKEN>/sendMessage``). The alert table is published with the state database, so only the
+    exception type and HTTP status are kept."""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    return f"{type(exc).__name__}" + (f" (HTTP {status})" if status else "")

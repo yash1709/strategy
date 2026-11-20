@@ -66,6 +66,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NSE_MONITOR_WEBHOOK: ${{ secrets.NSE_MONITOR_WEBHOOK }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # only used if [ai] enabled = true
         run: python -m nse_monitor --config config.cloud.toml run
 
       - name: Split state and prices
@@ -95,6 +96,27 @@ jobs:
           git commit -q -m "Data as of $(python -c "import json;print(json.load(open('meta.json'))['last_processed_day'])") (run ${{ github.run_id }})"
           git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
           cat meta.json
+
+      - name: Check data health (alerts if data is stale or incomplete)
+        continue-on-error: true      # the state is already published; this only raises the alarm
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NSE_MONITOR_WEBHOOK: ${{ secrets.NSE_MONITOR_WEBHOOK }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: python -m nse_monitor --config config.cloud.toml health
+
+      - name: Alert that the run failed
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NSE_MONITOR_WEBHOOK: ${{ secrets.NSE_MONITOR_WEBHOOK }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: >
+          python -m nse_monitor --config config.cloud.toml alert
+          "NSE monitor: daily run FAILED"
+          "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Keep a backup of this run's state
         if: always()

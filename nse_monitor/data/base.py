@@ -25,6 +25,12 @@ class Instrument:
     isin: str = ""
     listing_date: date | None = None
     kind: str = "EQUITY"        # "EQUITY" or "ETF"
+    exchange: str = "NSE"       # "NSE", or "BSE" for stocks listed only on BSE (their symbol ends in ".BO")
+
+
+def is_bse(symbol: str) -> bool:
+    """BSE-only stocks are stored as ``TICKER.BO``."""
+    return symbol.endswith(".BO")
 
 
 class MarketDataSource(ABC):
@@ -62,6 +68,14 @@ class MarketDataSource(ABC):
     def fetch_fund_aum(self, isins: Iterable[str]) -> tuple[str | None, dict[str, float]]:
         """(period label, {ISIN: AUM in rupees}) for ETFs. Optional: default is no AUM."""
         return None, {}
+
+    def fetch_sectors(self, symbols: Iterable[str]) -> dict[str, tuple[str, str]]:
+        """{symbol: (sector, industry)} for stocks. Optional: default is none (sector shows as unknown)."""
+        return {}
+
+    def fetch_news(self, symbol: str, limit: int = 8) -> list[str]:
+        """Recent headlines for one symbol, newest first ("2026-11-02: Company wins order"). Optional."""
+        return []
 
 
 def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:

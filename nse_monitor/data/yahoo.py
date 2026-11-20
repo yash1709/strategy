@@ -20,7 +20,8 @@ from typing import Iterable
 import pandas as pd
 import requests
 
-from .base import Instrument, MarketDataSource, normalize_bars
+from . import bse
+from .base import Instrument, MarketDataSource, is_bse, normalize_bars
 
 log = logging.getLogger(__name__)
 
@@ -37,10 +38,13 @@ class YahooNseSource(MarketDataSource):
     name = "yahoo"
 
     def __init__(self, series: list[str], batch_size: int = 100, reference_symbol: str = "^NSEI",
-                 retries: int = 3, include_etfs: bool = True, etf_exclude_categories: list[str] | None = None):
+                 retries: int = 3, include_etfs: bool = True, etf_exclude_categories: list[str] | None = None,
+                 include_bse: bool = False, bse_groups: list[str] | None = None):
         self.series = {s.upper() for s in series}
         self.include_etfs = include_etfs
         self.etf_exclude_categories = etf_exclude_categories or []
+        self.include_bse = include_bse
+        self.bse_groups = tuple(g.strip().upper() for g in (bse_groups or bse.DEFAULT_GROUPS))
         self.batch_size = batch_size
         self.reference_symbol = reference_symbol
         self.retries = retries
@@ -54,7 +58,25 @@ class YahooNseSource(MarketDataSource):
             etfs = parse_etf_list(pd.read_csv(io.StringIO(self._get(ETF_LIST_URL))), self.etf_exclude_categories)
             log.info("NSE ETF list: %d ETFs", len(etfs))
             out += etfs
+        if self.include_bse:
+            out += self._bse_only(out)
         return out
+
+    def _bse_only(self, nse: list[Instrument]) -> list[Instrument]:
+        """BSE stocks that are not also listed on NSE (matched by ISIN: NSE is preferred, so a
+        dual-listed company is tracked once). Raises if the BSE file is unavailable, so the engine keeps
+        its cached universe rather than treating every BSE stock as delisted."""
+        # the NSE ETF list may exclude liquid ETFs; match against the full ETF list so those are not
+        # picked up as "BSE-only" either
+        known = {i.isin for i in nse if i.isin}
+        try:
+            known |= {str(x).strip() for x in pd.read_csv(io.StringIO(self._get(ETF_LIST_URL)))["ISINNumber"]}
+        except Exception as exc:
+            log.debug("Could not read the full NSE ETF list for de-duplication: %s", exc)
+        found = bse.latest_instruments(self.bse_groups)
+        only = [i for i in found if i.isin not in known]
+        log.info("BSE: %d stocks in the chosen groups, %d are not listed on NSE", len(found), len(only))
+        return only
 
     def _get(self, url: str) -> str:
         resp = self._retry(lambda: requests.get(url, headers=_HEADERS, timeout=30))
@@ -124,10 +146,47 @@ class YahooNseSource(MarketDataSource):
         log.info("Shares outstanding: %d of %d symbols", len(found), len(symbols))
         return found
 
+    def fetch_sectors(self, symbols: Iterable[str]) -> dict[str, tuple[str, str]]:
+        import yfinance as yf
+
+        def one(symbol: str) -> tuple[str, tuple[str, str] | None]:
+            try:
+                info = yf.Ticker(self._ticker(symbol)).info or {}
+                return symbol, (info.get("sector") or "Unknown", info.get("industry") or "")
+            except Exception as exc:
+                log.debug("Sector unavailable for %s: %s", symbol, exc)
+                return symbol, None
+
+        symbols = list(symbols)
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            found = {s: v for s, v in pool.map(one, symbols) if v}
+        log.info("Sectors: %d of %d symbols", len(found), len(symbols))
+        return found
+
+    def fetch_news(self, symbol: str, limit: int = 8) -> list[str]:
+        import yfinance as yf
+
+        out: list[str] = []
+        for item in (yf.Ticker(self._ticker(symbol)).news or [])[:limit]:
+            content = item.get("content") if isinstance(item.get("content"), dict) else item
+            title = (content.get("title") or "").strip()
+            when = str(content.get("pubDate") or content.get("displayTime") or "")[:10]
+            if title:
+                out.append(f"{when}: {title}" if when else title)
+        return out
+
     def fetch_official_day(self, d: date) -> pd.DataFrame | None:
+        """NSE's end-of-day file, plus BSE's for the BSE-only stocks. A BSE failure never blocks the NSE bars."""
         from .bhavcopy import fetch_bhavcopy
 
-        return fetch_bhavcopy(d, self.series)
+        parts = [fetch_bhavcopy(d, self.series)]
+        if self.include_bse:
+            try:
+                parts.append(bse.fetch_bars(d, self.bse_groups))
+            except Exception as exc:
+                log.warning("BSE end-of-day file for %s unavailable: %s", d, exc)
+        parts = [p for p in parts if p is not None and len(p)]
+        return pd.concat(parts) if parts else None
 
     def fetch_fund_aum(self, isins: Iterable[str]) -> tuple[str | None, dict[str, float]]:
         from .amfi import AmfiClient
@@ -138,7 +197,7 @@ class YahooNseSource(MarketDataSource):
     # -- helpers ------------------------------------------------------------
     @staticmethod
     def _ticker(symbol: str) -> str:
-        return f"{symbol}.NS"
+        return symbol if is_bse(symbol) else f"{symbol}.NS"  # BSE symbols already end in .BO, Yahoo's BSE suffix
 
     @staticmethod
     def _download(tickers: list[str], start: date, end: date) -> pd.DataFrame:

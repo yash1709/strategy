@@ -33,13 +33,23 @@ the price history once. After that it runs by itself Mon–Fri at 17:37 IST, and
 scheduled runs 5–30 minutes late when it's busy.
 
 Optional alerts: under **Settings → Secrets and variables → Actions**, add `TELEGRAM_BOT_TOKEN`
-and `TELEGRAM_CHAT_ID`, or `NSE_MONITOR_WEBHOOK`.
+and `TELEGRAM_CHAT_ID`, or `NSE_MONITOR_WEBHOOK`. The same channels also carry the new entry digest,
+near-SMA-50 alerts, the data-health alert and the "daily run FAILED" alert.
+
+Optional AI notes: add the `ANTHROPIC_API_KEY` secret and set `enabled = true` under `[ai]` in
+`config.cloud.toml`. It costs API credits (at most about 10 short requests per run). Leave it off and
+nothing changes.
+
+**Upgrading an existing deployment:** nothing to migrate. The first run adds the new tables to `state.db`
+automatically. Backtest numbers and chart data fill in over the next runs; to fill them at once, run
+`python -m nse_monitor analytics` against a database that has the price cache. Make sure the app is redeployed
+with the new `requirements.txt` (the dashboard now needs Streamlit 1.50 or later).
 
 ## 4. Deploy the dashboard
 1. Go to https://share.streamlit.io and sign in with GitHub. Click **Create app →
    Deploy a public app from GitHub**.
 2. Set Repository to `<you>/<repo>`, Branch to `main`, and Main file to `streamlit_app.py`.
-3. Optional: under **Advanced settings → Secrets**, paste the lines below. By default the app already reads
+3. Optional: for the **Ask AI** tab add `ANTHROPIC_API_KEY = "sk-ant-..."` to the secrets. Also optional: under **Advanced settings → Secrets**, paste the lines below. By default the app already reads
    `yash1709/strategy` (`DEFAULT_GITHUB_REPO` in `streamlit_app.py`); a secret is needed only for a fork
    or a private repository:
    ```toml

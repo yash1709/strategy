@@ -1,6 +1,8 @@
-pandas>=2.2
-numpy>=1.26
-requests>=2.31
-yfinance>=0.2.40
-streamlit>=1.40
-pytest>=8.0
+# Runtime dependencies (the daily job and the dashboard). Upper bounds stop a new major release from
+# breaking the unattended daily run; raise them deliberately after running the tests.
+pandas>=2.2,<4
+numpy>=1.26,<3
+requests>=2.31,<3
+yfinance>=0.2.40,<2
+streamlit>=1.50,<2        # the dashboard uses width="stretch" on tables and charts (added in 1.49/1.50)
+anthropic>=1.0,<3         # optional AI notes and "Ask your data"; unused unless an API key is set

@@ -14,7 +14,8 @@ def create_source(cfg: AppConfig) -> MarketDataSource:
 
         return YahooNseSource(series=cfg.data.series, batch_size=cfg.data.batch_size,
                               reference_symbol=cfg.data.reference_symbol, include_etfs=cfg.data.include_etfs,
-                              etf_exclude_categories=cfg.data.etf_exclude_categories)
+                              etf_exclude_categories=cfg.data.etf_exclude_categories,
+                              include_bse=cfg.data.include_bse, bse_groups=cfg.data.bse_groups)
     if name == "csv":
         from .csv_source import CsvSource
 

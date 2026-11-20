@@ -9,10 +9,11 @@ from logging.handlers import RotatingFileHandler
 
 import pandas as pd
 
+from .analytics import backtest_summary, health_check
 from .config import AppConfig, load_config
 from .data import create_source
 from .engine import Engine
-from .notifications import build_notifiers, dispatch_pending, fmt_date
+from .notifications import build_notifiers, dispatch_pending, fmt_date, safe_error
 from .reports import HISTORY_DISPLAY_LIMIT, active_table, crossover_stats, export_reports, history_table
 from .storage import Repository
 
@@ -74,12 +75,33 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("export", help="write CSV + HTML reports")
     sub.add_parser("notify-test", help="send a test message on every configured channel")
     sub.add_parser("retry-alerts", help="re-send alerts that failed to deliver")
+    dm = sub.add_parser("demo", help="build an offline demo database of made-up stocks (data/demo.db)")
+    dm.add_argument("--force", action="store_true", help="rebuild if the demo database already exists")
+    sub.add_parser("analytics", help="rebuild forward returns, chart data and sectors from the price cache")
+    sub.add_parser("backtest", help="show what happened after each RSI<30 entry and SMA 50 crossover")
+    h = sub.add_parser("health", help="check the data is fresh and complete; alert if not")
+    h.add_argument("--no-notify", action="store_true", help="print the problems but do not send an alert")
+    al = sub.add_parser("alert", help="send a one-off message on every configured channel (used for failure alerts)")
+    al.add_argument("subject")
+    al.add_argument("body", nargs="?", default="")
 
     args = p.parse_args(argv)
     cfg = load_config(args.config)
     if args.db:
         cfg.db_path = args.db
     _setup_logging(cfg, args.verbose)
+    if args.cmd == "demo":  # separate database: never touches the real one
+        from .demo import build_demo
+        target = cfg.path("data/demo.db") if not args.db else cfg.path(args.db)
+        try:
+            summary = build_demo(target, force=args.force)
+        except FileExistsError as exc:
+            print(exc)
+            return 1
+        print(f"Demo database ready: {summary['days']} sessions, {summary['active']} stocks being tracked, "
+              f"{summary['crossovers']} crossovers.\n"
+              f"View it:  $env:NSE_MONITOR_DB = \"{target}\"; streamlit run streamlit_app.py")
+        return 0
     repo = Repository(cfg.path(cfg.db_path))
     notifiers = build_notifiers(cfg.notify)
 
@@ -124,7 +146,39 @@ def main(argv: list[str] | None = None) -> int:
                     n.send("NSE monitor test", "Notifications are configured correctly.")
                     print(f"{n.channel}: OK")
                 except Exception as exc:
-                    print(f"{n.channel}: FAILED - {exc}")
+                    print(f"{n.channel}: FAILED - {safe_error(exc)}")  # never print the URL: it contains the secret
+        elif args.cmd == "alert":
+            failed = 0
+            for n in notifiers:
+                try:
+                    n.send(args.subject, args.body)
+                except Exception as exc:
+                    failed += 1
+                    print(f"{n.channel}: FAILED - {safe_error(exc)}")
+            return 1 if failed and failed == len(notifiers) else 0
+        elif args.cmd == "analytics":
+            Engine(cfg, repo, create_source(cfg), notifiers).rebuild_analytics()
+            print("Analytics rebuilt.")
+        elif args.cmd == "backtest":
+            summary = backtest_summary(repo)
+            print(f"Signals measured: {summary['signals']}")
+            for key, title in (("overall", "Overall"), ("by_size", "By size"), ("by_speed", "By days to cross"),
+                               ("by_sector", "By sector"), ("by_month", "By month of entry")):
+                print(f"\n== {title} ==")
+                _print_df(summary[key], "Not enough data yet.")
+        elif args.cmd == "health":
+            problems = health_check(repo, date.today())
+            if problems:
+                text = "\n".join(problems)
+                print(text)
+                if not args.no_notify:
+                    for n in notifiers:
+                        try:
+                            n.send("NSE monitor: data problem", text)
+                        except Exception as exc:
+                            print(f"{n.channel}: FAILED - {safe_error(exc)}")
+                return 2
+            print("Healthy: data is fresh and complete.")
         elif args.cmd == "retry-alerts":
             sent, failed = dispatch_pending(repo, notifiers, cfg.notify.max_attempts)
             print(f"sent {sent}, failed {failed}")

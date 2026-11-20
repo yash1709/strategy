@@ -8,6 +8,8 @@ log_dir = "logs"
 series = ["EQ"]
 include_etfs = true
 etf_exclude_categories = ["Overnight ETFs and Liquid ETF"]
+include_bse = true                              # BSE-only stocks (symbols end in .BO); set false to go back to NSE only
+bse_groups = ["A", "B", "X", "XT"]
 
 [notify]
 console = true                                  # appears in the workflow log
@@ -16,3 +18,12 @@ telegram_bot_token = "${TELEGRAM_BOT_TOKEN}"    # optional repository secrets
 telegram_chat_id = "${TELEGRAM_CHAT_ID}"
 webhook_url = "${NSE_MONITOR_WEBHOOK}"
 smtp_password = "${SMTP_PASSWORD}"
+
+[alerts]
+on_entry = true                                 # daily digest of new RSI<30 entries
+on_near_cross = true                            # "within 2% below SMA 50" alerts (once per cycle)
+near_cross_pct = 2.0
+
+# Claude notes on new entries. To turn on: set enabled = true and add the ANTHROPIC_API_KEY repository secret.
+[ai]
+enabled = false

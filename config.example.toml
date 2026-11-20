@@ -15,12 +15,21 @@ min_close = 0.0                 # e.g. 10.0 to skip penny stocks
 min_avg_volume = 0.0            # e.g. 50000 to skip illiquid stocks (20-day average volume)
 stale_after_missing_days = 5    # flag DATA_MISSING after this many sessions with no bar
 remove_after_missing_days = 60  # then close as DATA_UNAVAILABLE
+delist_grace_days = 3           # sessions missing from the NSE list AND without a price before closing as DELISTED
+# Optional rule variants. All are OFF by default, so the core rules (RSI<30 in, close>SMA 50 out) are unchanged.
+# Note: after an early exit a stock that is still oversold can be picked up again as a new cycle.
+entry_confirmation = "none"     # "rsi_turn" = enter only once RSI has ticked up while still below the threshold
+max_tracking_days = 0           # e.g. 60: close as TIME_LIMIT if there is no crossover by then (0 = off)
+exit_rsi = 0.0                  # e.g. 50: close as RSI_RECOVERED once RSI rises above this (0 = off)
+stop_loss_pct = 0.0             # e.g. 10: close as STOP_LOSS if the close falls 10% below the RSI-day close (0 = off)
 
 [data]
 source = "yahoo"                # "yahoo" (NSE list + Yahoo Finance) or "csv"
 csv_dir = "data_csv"
-series = ["EQ"]                 # add "BE", "BZ", "SM" etc. to widen the universe
+series = ["EQ"]                 # add "BE", "BZ", "SM" etc. to widen the universe (SME names often lack Yahoo data)
 include_etfs = true             # also track NSE ETFs (equity, gold, silver, debt, international)
+include_bse = true              # also track stocks listed on BSE but NOT on NSE (about 1,400 in groups A/B/X/XT)
+bse_groups = ["A", "B", "X", "XT"]  # BSE trading groups: A/B larger, X/XT regular small caps; M=SME, F=debt, Z=non-compliant
 etf_exclude_categories = ["Overnight ETFs and Liquid ETF"]   # price pinned at ~1000: RSI is noise
 history_days = 550
 refresh_overlap_days = 20
@@ -30,6 +39,9 @@ market_close_cutoff = "16:00"   # IST
 min_coverage = 0.9
 shares_refresh_days = 7         # market cap = shares outstanding x close
 reference_symbol = "^NSEI"
+sector_refresh_days = 30        # sector/industry look-ups (tracked symbols only) are refreshed this often
+sector_batch_limit = 150        # at most this many sector look-ups per run
+price_mismatch_pct = 1.0        # flag Yahoo vs NSE official close differences above this many %
 
 [notify]
 console = true
@@ -47,3 +59,22 @@ smtp_password = "${SMTP_PASSWORD}"
 smtp_use_tls = true
 email_from = ""
 email_to = []
+
+# Which events alert you. (Crossover alerts are always on; these filters apply to every alert type.)
+[alerts]
+on_entry = true                 # one digest per run listing new RSI<30 entries, best quality first
+entry_min_quality = 0           # e.g. 50: only list entries with a quality score of at least 50
+entry_max_listed = 25
+on_near_cross = true            # alert when a tracked stock gets within near_cross_pct below SMA 50 (once per cycle)
+near_cross_pct = 2.0
+near_cross_max = 10             # at most this many near-cross alerts per run, largest first
+min_market_cap_cr = 0           # e.g. 5000: ignore names smaller than this (Rs crore); unknown size is never filtered out
+kinds = ["EQUITY", "ETF"]       # instrument types that alert
+
+# Optional Claude notes on new entries (plain-English reason + news-risk flag). Needs ANTHROPIC_API_KEY.
+[ai]
+enabled = false
+model = "claude-opus-5-5"
+effort = "low"                  # low | medium | high
+max_notes_per_run = 10          # the best-quality entries of each run get a note
+use_news = true                 # include recent Yahoo headlines as context
