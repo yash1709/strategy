@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 
 HORIZONS = (5, 10, 20)
 MIN_BENCH_STOCKS = 5
-CHART_BARS = 150
+CHART_BARS = 90          # about 4 months of sessions: enough context around an entry, and keeps state.db small
+CHART_HISTORY_DAYS = 30  # stocks that exited more recently than this keep their chart
 CRORE = 1e7
 LARGE_CR, MID_CR = 20_000, 5_000
 
@@ -124,7 +125,8 @@ def backtest_summary(repo: Repository) -> dict:
 
 
 # ---------------------------------------------------------------- chart bars
-def refresh_chart_bars(repo: Repository, book: IndicatorBook, today: date, history_days: int = 60) -> int:
+def refresh_chart_bars(repo: Repository, book: IndicatorBook, today: date,
+                       history_days: int = CHART_HISTORY_DAYS) -> int:
     """Keep the last ``CHART_BARS`` bars for tracked stocks and stocks that exited recently."""
     symbols = repo.active_symbols() | repo.recent_history_symbols(today - timedelta(days=history_days))
     for s in sorted(symbols):

@@ -205,11 +205,20 @@ def test_chart_bars_hold_recent_bars_for_tracked_and_exited_stocks(market, make_
     source, cal, closes = market
     engine, repo, _ = make_engine(source)
     engine.run(as_of=cal[-1], start=cal[120])
+    book = IndicatorBook(repo.load_all_prices(), engine.cfg.strategy)
+    exited = date.fromisoformat(repo.history()[0]["exit_date"])
+
+    # a stock that exited inside the window keeps its chart, trimmed to the last CHART_BARS sessions
+    analytics.refresh_chart_bars(repo, book, exited + timedelta(days=analytics.CHART_HISTORY_DAYS - 1))
     bars = repo.chart_bars("DIPCO")
-    assert 0 < len(bars) <= analytics.CHART_BARS
+    assert 0 < len(bars) <= analytics.CHART_BARS == 90
     assert bars["date"].iloc[-1] == cal[-1].isoformat()
     assert bars["close"].iloc[-1] == pytest.approx(closes[-1])
     assert repo.chart_bars("FLAT").empty  # never tracked, so no chart data kept
+
+    # once it exited longer ago than the window, its chart is dropped to keep the published file small
+    analytics.refresh_chart_bars(repo, book, exited + timedelta(days=analytics.CHART_HISTORY_DAYS + 1))
+    assert repo.chart_bars("DIPCO").empty
 
 
 def test_empty_backtest_is_safe():

@@ -419,8 +419,8 @@ with tab_chart:
     bars, notes = extra["bars"], extra["notes"]
     choices = _chart_symbols(active, hist, bars)
     if not choices:
-        st.info("Chart data appears after the next daily run (it holds the last 150 sessions for every tracked "
-                "stock and for stocks that exited in the last 60 days).")
+        st.info("Chart data appears after the next daily run (it holds the last 90 sessions for every tracked "
+                "stock and for stocks that exited in the last 30 days).")
     else:
         sym = st.selectbox("Stock", choices, help="Tracked stocks first, then recent exits")
         sb = bars[bars["symbol"] == sym].sort_values("date")
