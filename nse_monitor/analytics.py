@@ -137,6 +137,16 @@ def refresh_chart_bars(repo: Repository, book: IndicatorBook, today: date,
     return len(symbols)
 
 
+def trim_chart_bars(repo: Repository, today: date, max_bars: int = CHART_BARS,
+                    history_days: int = CHART_HISTORY_DAYS) -> int:
+    """Apply the chart retention rules to what is already stored, without needing prices: drop charts of
+    stocks that are neither tracked nor recent exits, and keep only the newest ``max_bars`` of the rest.
+    Runs on every job run (a run with no new trading day never refreshes charts, so without this a change of
+    the limits would not shrink the published file until the next session). Returns rows removed."""
+    keep = repo.active_symbols() | repo.recent_history_symbols(today - timedelta(days=history_days))
+    return repo.trim_chart_bars(keep, max_bars)
+
+
 # ---------------------------------------------------------------- data health
 HEALTH_EVENTS = ["OFFICIAL_EOD_FILL", "PRICE_SOURCE_MISMATCH", "PRICE_DISCONTINUITY_ADJUSTED", "PRICE_HISTORY_ADJUSTED",
                  "LOW_COVERAGE_DAY", "DAY_DEFERRED", "PRICE_FETCH_FAILED", "UNIVERSE_REFRESH_FAILED",

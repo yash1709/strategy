@@ -515,6 +515,18 @@ class Repository:
         with self.transaction():
             self.conn.executemany("DELETE FROM chart_bars WHERE symbol=?", [(s,) for s in have - keep])
 
+    def trim_chart_bars(self, keep: set[str], max_bars: int) -> int:
+        """Delete chart rows of symbols not in ``keep``, and all but the newest ``max_bars`` rows of the others."""
+        before = self.conn.total_changes
+        with self.transaction():
+            self.prune_chart_bars(keep)
+            for symbol in keep:
+                self.conn.execute(
+                    """DELETE FROM chart_bars WHERE symbol=? AND date < (
+                           SELECT date FROM chart_bars WHERE symbol=? ORDER BY date DESC LIMIT 1 OFFSET ?)""",
+                    (symbol, symbol, max_bars - 1))
+        return self.conn.total_changes - before
+
     def chart_bars(self, symbol: str) -> pd.DataFrame:
         rows = self._all("SELECT date, close, sma50, rsi FROM chart_bars WHERE symbol=? ORDER BY date", (symbol,))
         return pd.DataFrame(rows, columns=["date", "close", "sma50", "rsi"])

@@ -329,7 +329,7 @@ To switch to an official or broker feed (NSE bhavcopy, Kite, Upstox and so on), 
 .\.venv\Scripts\python.exe -m pytest        # about 1.5 minutes
 ```
 
-117 tests cover the core rules, BSE parsing and universe building, the extra features (quality score, optional exits, breadth and signals, backtest, alerts and filters, gap filling, sectors, health checks, AI helpers with a fake client, CLI) and the dashboard. The AI calls themselves are only tested against a fake client, never the live API. The core tests include:
+119 tests cover the core rules, BSE parsing and universe building, the extra features (quality score, optional exits, breadth and signals, backtest, alerts and filters, gap filling, sectors, health checks, AI helpers with a fake client, CLI) and the dashboard. The AI calls themselves are only tested against a fake client, never the live API. The core tests include:
 - RSI correctness and causality
 - the full entry → crossover cycle
 - day-by-day runs matching a replay exactly

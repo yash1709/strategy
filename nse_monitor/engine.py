@@ -292,6 +292,14 @@ class Engine:
         except Exception as exc:  # optional extras must never fail the run
             log.error("Analytics catch-up failed: %s", exc)
             self.repo.audit("POST_STEP_FAILED", step="catch_up", error=str(exc)[:300])
+        try:
+            last = self.repo.last_processed_day()
+            if last:
+                removed = analytics.trim_chart_bars(self.repo, last)
+                if removed:
+                    log.info("Trimmed %d stored chart rows to the retention limits", removed)
+        except Exception as exc:
+            log.error("Chart trimming failed: %s", exc)
         self._refresh_market_caps(date.today())
         if notify:
             res.alerts_sent, res.alerts_failed = dispatch_pending(self.repo, self.notifiers,

@@ -221,6 +221,44 @@ def test_chart_bars_hold_recent_bars_for_tracked_and_exited_stocks(market, make_
     assert repo.chart_bars("DIPCO").empty
 
 
+def chart_frame(n, end=date(2026, 11, 20)):
+    days = [end - timedelta(days=k) for k in range(n - 1, -1, -1)]
+    return pd.DataFrame({"date": days, "close": [1.0] * n, "sma50": [1.0] * n, "rsi": [50.0] * n})
+
+
+def seed_chart_state(repo):
+    """A tracked stock, a recent exit, an old exit and an unrelated stock, each with 120 stored bars."""
+    base = date(2026, 8, 3)
+    with repo.transaction():
+        repo.add_active("TRACKED", "Tracked", base, 25.0, 100.0, "ACTIVE")
+        for sym, exit_d in (("RECENT", date(2026, 11, 10)), ("OLD", date(2026, 8, 20))):
+            tid = repo.add_active(sym, sym, base, 25.0, 100.0, "ACTIVE")
+            repo.close_tracking(next(r for r in repo.active() if r["id"] == tid), "SMA50_CROSSED",
+                                exit_date=exit_d, crossover_date=exit_d, cmp=1.0, sma50=1.0, days_taken=3)
+    for sym in ("TRACKED", "RECENT", "OLD", "UNRELATED"):
+        repo.replace_chart_bars(sym, chart_frame(120))
+
+
+def test_trim_applies_the_retention_rules_without_needing_prices():
+    repo = Repository(":memory:")
+    seed_chart_state(repo)
+    assert analytics.trim_chart_bars(repo, date(2026, 11, 20)) > 0
+    assert len(repo.chart_bars("TRACKED")) == analytics.CHART_BARS == len(repo.chart_bars("RECENT"))
+    assert repo.chart_bars("TRACKED")["date"].iloc[-1] == "2026-11-20"           # the newest bars are kept
+    assert repo.chart_bars("OLD").empty and repo.chart_bars("UNRELATED").empty    # outside the retention rules
+    assert analytics.trim_chart_bars(repo, date(2026, 11, 20)) == 0              # nothing left to trim
+
+
+def test_every_run_trims_stored_charts_even_when_there_is_nothing_new_to_process(market, make_engine):  # noqa: F811
+    source, cal, _ = market
+    engine, repo, _ = make_engine(source)
+    engine.run(as_of=cal[-1], start=cal[120])
+    repo.replace_chart_bars("STRAY", chart_frame(200))        # leftovers from before the limits were lowered
+    res = engine.run(as_of=cal[-1])
+    assert res.processed_days == []
+    assert repo.chart_bars("STRAY").empty
+
+
 def test_empty_backtest_is_safe():
     summary = analytics.backtest_summary(Repository(":memory:"))
     assert summary["signals"] == 0 and summary["overall"].empty
